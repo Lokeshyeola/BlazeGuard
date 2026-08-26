@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maharashtra Digital University - Examination Result Portal</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Academic Demo Banner -->
+  <aside class="demo-banner no-print">
+    <div class="container">
+      <p><strong>DEMO PORTAL:</strong> BlazeGuard Smart Virtual Queue System (SIH 2026 Demonstration).</p>
+    </div>
+  </aside>
+
+  <!-- University Header -->
+  <header class="site-header no-print">
+    <div class="container header-container">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">MDU</div>
+        <div class="brand-text">
+          <h1>Maharashtra Digital University</h1>
+          <p>Examination &amp; Evaluation Department</p>
+        </div>
+      </div>
+      
+      <button class="nav-toggle" id="navToggle" type="button" aria-label="Toggle navigation">
+        <span class="hamburger"></span>
+      </button>
+
+      <nav class="site-nav" id="siteNav">
+        <ul>
+          <li><a href="#" class="active" id="navHomeLink">Home</a></li>
+          <li><a href="#results-section">Results</a></li>
+          <li><a href="#instructions-section">Instructions</a></li>
+          <li><a href="#contact-section">Contact</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Content Wrapper -->
+  <main class="main-content" id="results-section">
+    <div class="container">
+      
+      <!-- Section Title -->
+      <section class="portal-intro no-print" id="portalIntroSection">
+        <h2>Examination Result Portal</h2>
+        <p>Online statement of marks for regular and backlog university examinations</p>
+      </section>
+
+      <!-- ========================================================
+           VIEW 1: RESULT SEARCH FORM (Initial Screen)
+           ======================================================== -->
+      <section class="card form-card" id="searchView">
+        <div class="card-header">
+          <h3>Verify Student Credentials</h3>
+          <p>Enter your examination credentials as printed on your Hall Ticket.</p>
+        </div>
+
+        <form id="resultSearchForm" class="result-form" novalidate>
+          <div class="form-group">
+            <label for="examSession">Examination Session <span class="required">*</span></label>
+            <select id="examSession" name="examSession" required>
+              <option value="">-- Select Examination Session --</option>
+              <option value="FE Semester I">FE Semester I</option>
+              <option value="FE Semester II" selected>FE Semester II</option>
+              <option value="SE Semester I">SE Semester I</option>
+              <option value="SE Semester II">SE Semester II</option>
+              <option value="TE Semester I">TE Semester I</option>
+              <option value="TE Semester II">TE Semester II</option>
+              <option value="BE Semester I">BE Semester I</option>
+              <option value="BE Semester II">BE Semester II</option>
+            </select>
+            <span class="error-message" id="examSessionError"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="examType">Examination Type <span class="required">*</span></label>
+            <select id="examType" name="examType" required>
+              <option value="">-- Select Examination Type --</option>
+              <option value="Regular Examination" selected>Regular Examination</option>
+              <option value="Backlog Examination">Backlog Examination</option>
+            </select>
+            <span class="error-message" id="examTypeError"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="seatNumber">Seat / Roll Number <span class="required">*</span></label>
+            <input 
+              type="text" 
+              id="seatNumber" 
+              name="seatNumber" 
+              placeholder="e.g. 123456" 
+              autocomplete="off" 
+              required 
+            />
+            <span class="error-message" id="seatNumberError"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="motherName">Mother's Name <span class="required">*</span></label>
+            <input 
+              type="text" 
+              id="motherName" 
+              name="motherName" 
+              placeholder="Enter Mother's First Name (e.g. Sunita)" 
+              autocomplete="off" 
+              required 
+            />
+            <span class="error-message" id="motherNameError"></span>
+          </div>
+
+          <div class="form-group">
+            <label for="dob">Date of Birth <span class="required">*</span></label>
+            <input type="date" id="dob" name="dob" required />
+            <span class="error-message" id="dobError"></span>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" id="submitBtn" class="btn btn-primary">
+              <span class="btn-text">CHECK RESULT</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+
+      <!-- ========================================================
+           VIEW 2: SMART VIRTUAL QUEUE SCREEN (In-Place Screen)
+           ======================================================== -->
+      <section class="card queue-card" id="queueView" style="display: none;">
+        <!-- Header -->
+        <div class="queue-header">
+          <div class="queue-live-indicator">
+            <span class="pulse-dot"></span> SMART VIRTUAL QUEUE
+          </div>
+          <h2 id="queueHeading">YOU ARE IN QUEUE</h2>
+          <p id="queueSubtitle">Your request has been successfully received.</p>
+          <div class="queue-ticket-badge">
+            Queue Token: <strong id="queueIdDisplay">DEMO-XXXXX</strong> | Seat No: <strong id="queueSeatDisplay">------</strong>
+          </div>
+        </div>
+
+        <!-- 3 Metric Cards -->
+        <div class="queue-metrics-grid">
+          <div class="metric-box">
+            <span class="metric-label">Queue Position</span>
+            <span class="metric-value text-highlight" id="queuePositionDisplay">#1245</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-label">Estimated Wait</span>
+            <span class="metric-value" id="queueEtaDisplay">~5 minutes</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-label">Status</span>
+            <span class="status-pill status-pill-waiting" id="queueStatusDisplay">WAITING</span>
+          </div>
+        </div>
+
+        <!-- Progress Tracker -->
+        <div class="queue-progress-wrapper">
+          <div class="progress-meta">
+            <span id="queueProgressText">Your request is being buffered safely...</span>
+            <span id="queueProgressPercent">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="queueProgressBar" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Required User Messages & Alerts -->
+        <div class="queue-alerts">
+          <!-- Batch Traffic Message -->
+          <div class="alert-box alert-highlight">
+            <p>Due to high traffic, requests are being processed in controlled batches to keep the result service stable.</p>
+          </div>
+
+          <!-- Notification Alert -->
+          <div class="info-callout">
+            <span class="callout-icon">🔔</span>
+            <p>We will notify you when your turn arrives.</p>
+          </div>
+
+          <!-- Anti-Refresh Warning Alert -->
+          <div class="alert-box alert-warning">
+            <p><strong>⚠️ Please do not refresh or submit the request again.</strong></p>
+            <p class="small-text">Refreshing may create an additional request and increase your waiting time.</p>
+          </div>
+        </div>
+
+        <!-- In-Queue Processing State (Triggered upon timer completion) -->
+        <div class="queue-processing-box" id="queueProcessingState" style="display: none;">
+          <div class="spinner"></div>
+          <h4>PROCESSING YOUR RESULT...</h4>
+          <p>Decrypting examination mark records and generating mark statement. Please wait...</p>
+        </div>
+      </section>
+
+
+      <!-- ========================================================
+           VIEW 3: UNIVERSITY EXAMINATION RESULT (In-Place Result)
+           ======================================================== -->
+      <section class="result-view-container" id="resultView" style="display: none;">
+        <!-- Non-printable Top Actions Bar -->
+        <div class="result-actions-bar no-print">
+          <button type="button" class="btn btn-secondary" id="searchAgainBtn">&larr; Search Another Result</button>
+          <button type="button" class="btn btn-primary" id="printResultBtn">DOWNLOAD / PRINT RESULT</button>
+        </div>
+
+        <!-- Printable Marksheet Card -->
+        <article class="card result-card" id="marksheetCard">
+          <header class="marksheet-header">
+            <div class="brand-logo print-logo" aria-hidden="true">MDU</div>
+            <h2>MAHARASHTRA DIGITAL UNIVERSITY</h2>
+            <h3>EXAMINATION &amp; EVALUATION DEPARTMENT</h3>
+            <p class="doc-title">UNIVERSITY EXAMINATION RESULT</p>
+          </header>
+
+          <!-- Student Information Grid (Dynamically Populated from Form Input) -->
+          <section class="student-meta-grid" aria-label="Student Credentials">
+            <div class="meta-item">
+              <span class="meta-label">Examination Session:</span>
+              <span class="meta-value" id="resExamSession">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Examination Type:</span>
+              <span class="meta-value" id="resExamType">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Seat Number:</span>
+              <span class="meta-value" id="resSeatNumber">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Mother's Name:</span>
+              <span class="meta-value" id="resMotherName">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Date of Birth:</span>
+              <span class="meta-value" id="resDob">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">PRN / Roll No:</span>
+              <span class="meta-value" id="resPrn">--</span>
+            </div>
+          </section>
+
+          <!-- Marks Table -->
+          <section class="table-responsive" aria-label="Marks Details">
+            <table class="marks-table">
+              <thead>
+                <tr>
+                  <th scope="col" style="width: 15%;">Subject Code</th>
+                  <th scope="col" style="width: 45%;">Subject</th>
+                  <th scope="col" style="width: 15%; text-align: center;">Max Marks</th>
+                  <th scope="col" style="width: 15%; text-align: center;">Obtained</th>
+                  <th scope="col" style="width: 10%; text-align: center;">Grade</th>
+                </tr>
+              </thead>
+              <tbody id="marksTableBody">
+                <!-- Subject rows inserted dynamically by main.js -->
+              </tbody>
+            </table>
+          </section>
+
+          <!-- Result Summary Grid -->
+          <section class="result-summary-grid">
+            <div class="summary-card">
+              <span class="summary-label">Total Marks</span>
+              <span class="summary-value" id="resTotalMarks">407 / 500</span>
+            </div>
+            <div class="summary-card">
+              <span class="summary-label">Percentage</span>
+              <span class="summary-value" id="resPercentage">81.40%</span>
+            </div>
+            <div class="summary-card">
+              <span class="summary-label">Result</span>
+              <span class="summary-badge badge-pass" id="resStatus">PASS</span>
+            </div>
+          </section>
+
+          <!-- Marksheet Sign-off Footer -->
+          <footer class="marksheet-footer">
+            <div class="sign-block">
+              <p><strong>Date of Declaration:</strong> <span id="resDeclarationDate">18 August 2026</span></p>
+              <p class="micro-text">Disclaimer: The marks published online are for immediate reference. Authentic mark sheets will be issued by respective colleges.</p>
+            </div>
+            <div class="sign-block authority-sign">
+              <div class="signature-line"></div>
+              <p><strong>Director</strong></p>
+              <p>Board of Examinations &amp; Evaluation</p>
+            </div>
+          </footer>
+        </article>
+      </section>
+
+      <!-- Informational Section -->
+      <section class="instructions-card no-print" id="instructions-section">
+        <h4>Important Instructions for Students</h4>
+        <ul>
+          <li>The online statement of marks is for immediate student reference only.</li>
+          <li>During peak traffic, all incoming queries are buffered safely via the BlazeGuard Virtual Queue.</li>
+          <li>Your queue ticket and session persist automatically if your page refreshes.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <!-- Standard University Footer -->
+  <footer class="site-footer no-print" id="contact-section">
+    <div class="container footer-grid">
+      <div class="footer-col">
+        <h4>Maharashtra Digital University</h4>
+        <p>Examination &amp; Evaluation Department<br>Ganeshkhind Road, Pune - 411007</p>
+      </div>
+      <div class="footer-col">
+        <h4>Support &amp; Helpdesk</h4>
+        <p>Email: exam-support@mdu-demo.ac.in</p>
+        <p>Helpline: +91 (020) 2560-1234</p>
+        <p>Hours: Mon - Sat (10:00 AM to 5:00 PM)</p>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="container">
+        <p>&copy; 2026 Maharashtra Digital University (Demo Examination Portal - SIH BlazeGuard).</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
