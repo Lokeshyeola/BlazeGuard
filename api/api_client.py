@@ -11,8 +11,8 @@ Why this exists:
  - Easy to swap backend URL / auth strategy in ONE place
  - Consistent error format across the whole app
 
-ASSUMPTIONS (adjust these to match the real BlazeGuard backend):
- - Backend speaks JSON over HTTPS
+BACKEND CONTRACT:
+ - Local backend speaks JSON over HTTP at http://127.0.0.1:8000
  - Auth via Bearer token, read from env var BLAZEGUARD_TOKEN
  - Base URL comes from env var BLAZEGUARD_API_URL
 Change the CONFIG block below once real backend details are known.
@@ -24,9 +24,9 @@ import os
 import requests
 
 
-# ---------- CONFIG (edit this to match real BlazeGuard backend) ----------
+# ---------- CONFIG ----------
 class Config:
-    BASE_URL = os.environ.get("BLAZEGUARD_API_URL", "https://api.blazeguard.local/v1")
+    BASE_URL = os.environ.get("BLAZEGUARD_API_URL", "http://127.0.0.1:8000").rstrip("/")
     TIMEOUT_SECONDS = 10
     TOKEN_ENV_VAR = "BLAZEGUARD_TOKEN"
 

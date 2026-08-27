@@ -8,6 +8,8 @@
 // ==========================================
 const DEMO_WAIT_TIME = 15; // Complete virtual demo wait in ~15 seconds
 const POSITION_STEPS = [1245, 1000, 750, 500, 250, 100, 25, 1];
+const BACKEND_URL = "http://127.0.0.1:8000";
+const STATUS_POLL_INTERVAL = 5000;
 
 // Fixed demonstration subject marks dataset
 const DEMO_MARKS = [
@@ -19,6 +21,8 @@ const DEMO_MARKS = [
 ];
 
 let queueIntervalTimer = null;
+let statusPollTimer = null;
+let statusRequestController = null;
 
 // ==========================================
 // 2. INITIALIZATION & REFRESH RECOVERY
@@ -166,6 +170,7 @@ function initiateQueue(studentData) {
   sessionStorage.setItem("mdu_portal_session", JSON.stringify(sessionState));
 
   showQueueScreen(sessionState);
+  startBackendStatusPolling(sessionState);
   startQueueDemo(sessionState, 0);
 }
 
@@ -176,6 +181,54 @@ function showQueueScreen(sessionState) {
 
   document.getElementById("queueIdDisplay").textContent = sessionState.queueId;
   document.getElementById("queueSeatDisplay").textContent = sessionState.studentData.seatNumber;
+}
+
+function startBackendStatusPolling(sessionState) {
+  stopBackendStatusPolling();
+  updateBackendStatus(sessionState, 0);
+  statusPollTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - sessionState.startTime) / 1000);
+    updateBackendStatus(sessionState, Math.min(elapsed, DEMO_WAIT_TIME));
+  }, STATUS_POLL_INTERVAL);
+}
+
+function stopBackendStatusPolling() {
+  if (statusPollTimer) clearInterval(statusPollTimer);
+  statusPollTimer = null;
+  if (statusRequestController) statusRequestController.abort();
+  statusRequestController = null;
+}
+
+async function updateBackendStatus(sessionState, elapsedSeconds) {
+  if (statusRequestController) statusRequestController.abort();
+  const controller = new AbortController();
+  statusRequestController = controller;
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  const etaSeconds = Math.max(DEMO_WAIT_TIME - elapsedSeconds, 0);
+
+  try {
+    const response = await fetch(
+      `${BACKEND_URL}/system-status?eta_seconds=${etaSeconds}`,
+      { signal: controller.signal }
+    );
+    if (!response.ok) throw new Error(`Backend returned HTTP ${response.status}`);
+
+    const payload = await response.json();
+    if (!["NORMAL", "WARNING", "CRITICAL", "DELAY"].includes(payload.decision)) {
+      throw new Error("Backend returned an invalid decision");
+    }
+
+    document.getElementById("systemStatusDisplay").textContent = payload.decision;
+    document.getElementById("systemStatusDetails").textContent =
+      `Live CPU ${payload.metrics.cpu_percent}% | RAM ${payload.metrics.ram_percent}%`;
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    document.getElementById("systemStatusDisplay").textContent = "UNAVAILABLE";
+    document.getElementById("systemStatusDetails").textContent =
+      "BlazeGuard backend is unavailable. The demonstration queue is still running.";
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function startQueueDemo(sessionState, initialElapsed) {
@@ -242,6 +295,7 @@ async function showTurnArrival(studentData) {
 }
 
 async function showProcessing(studentData) {
+  stopBackendStatusPolling();
   const processingBox = document.getElementById("queueProcessingState");
   processingBox.style.display = "block";
   processingBox.scrollIntoView({ behavior: "smooth" });
@@ -328,6 +382,7 @@ function restoreSession() {
 
   const elapsedSeconds = Math.floor((Date.now() - sessionState.startTime) / 1000);
   showQueueScreen(sessionState);
+  startBackendStatusPolling(sessionState);
 
   if (elapsedSeconds >= DEMO_WAIT_TIME) {
     showTurnArrival(sessionState.studentData);
@@ -338,6 +393,7 @@ function restoreSession() {
 
 function resetPortal() {
   if (queueIntervalTimer) clearInterval(queueIntervalTimer);
+  stopBackendStatusPolling();
   sessionStorage.removeItem("mdu_portal_session");
 
   // Reset form
@@ -356,6 +412,8 @@ function resetPortal() {
   statusPill.className = "status-pill status-pill-waiting";
 
   document.getElementById("queueProcessingState").style.display = "none";
+  document.getElementById("systemStatusDisplay").textContent = "CHECKING";
+  document.getElementById("systemStatusDetails").textContent = "Connecting to the live backend...";
 
   // Switch back to Search Form
   document.getElementById("queueView").style.display = "none";

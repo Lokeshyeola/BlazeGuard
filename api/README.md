@@ -16,10 +16,10 @@ A middle layer of code that sits between the **Frontend** and the **BlazeGuard B
 Frontend / Consumer code
       |
       v
-blazeguard_api.get_status()    <- endpoint function
+blazeguard_api.get_system_status() <- endpoint function
       |
       v
-api_client.get("/status")      <- core client (adds headers, base URL)
+api_client.get("/system-status") <- core client (adds headers, base URL)
       |
       v
 requests library -> BlazeGuard Backend
@@ -35,19 +35,20 @@ Parsed data (or ApiError) returned to caller
 - **Python `requests` library** (`pip install requests`) — simple, widely used, easy to extend with retries/sessions later.
 - Could swap to **httpx** later if you want async support — structure stays the same either way.
 
-## 6. What's assumed / needs real info
-- `BASE_URL` — placeholder `https://api.blazeguard.local/v1`, read from env var `BLAZEGUARD_API_URL`. Replace/set with real backend URL.
-- Auth — assumed Bearer token read from env var `BLAZEGUARD_TOKEN`. Update `_get_auth_token()` if BlazeGuard uses cookies/session/OAuth instead.
-- Endpoint paths (`/status`, `/alerts`, `/scan`, `/auth/login`) — **placeholders**. Replace with real routes from Blazeguard backend docs/Swagger.
+## 6. Active backend contract
+- `BASE_URL` defaults to `http://127.0.0.1:8000` and can be overridden with `BLAZEGUARD_API_URL`.
+- `GET /system-status?eta_seconds=15` samples real CPU/RAM metrics and returns the decision.
+- `POST /decision` accepts `cpu_percent`, `ram_percent`, and `eta_seconds` and returns the decision.
+- Bearer authentication remains optional through `BLAZEGUARD_TOKEN`; the local backend does not require it.
 
 ## 7. Files in this prototype
 | File | Purpose |
 |---|---|
 | `api_client.py` | Core GET/POST/PUT/DELETE engine, error handling, auth headers |
 | `blazeguard_endpoints.py` | Named functions frontend/consumer code actually calls |
-| `example_usage.py` | Demo of how the layer would be used, tested and runs successfully |
+| `demo_working.py` | Smoke test against the running local backend |
 
 **Requires:** `pip install requests`
 
-## Next step
-Send over the real BlazeGuard backend routes (or Swagger/Postman collection) and I'll swap the placeholder paths in `blazeguardEndpoints.js` for the real ones.
+## Run the smoke test
+Start the backend from the repository root, then run `python demo_working.py` from `/api`.
