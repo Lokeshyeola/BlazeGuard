@@ -33,4 +33,3 @@ def get_decision(metrics: ServerMetrics):
         "decision": decision
     }
 
-Get-Content monitoring\main.py -TotalCount 40
