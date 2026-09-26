@@ -1,54 +1,7 @@
-# BlazeGuard API Communication Layer
+# API client prototype
 
-## 1. What is it?
-A middle layer of code that sits between the **Frontend** and the **BlazeGuard Backend**. Instead of the frontend calling `fetch()`/`axios` directly all over the codebase, every request goes through this one module.
+api_client.py is an outbound Python HTTP client. It centralizes the base URL, timeout, JSON requests, and optional bearer-token header. blazeguard_endpoints.py wraps the current local prototype routes /system-status and /decision; demo_working.py is a manual smoke script for those routes.
 
-## 2. Why do we need it in BlazeGuard?
-- Without it: every frontend component would duplicate URL-building, headers, error handling → messy and inconsistent.
-- With it: one place to change the base URL, auth method, timeout, or error format. Easier to maintain, test, and secure.
+Run the root FastAPI app first, then run python api/demo_working.py from the repository root. Install dependencies from the root requirements.txt.
 
-## 3. How does it work?
-- `api_client.py` — the core engine: builds headers (incl. auth token), sends the request, handles timeouts, normalizes errors into a single `ApiError` class.
-- `blazeguard_endpoints.py` — a friendly list of named functions (`get_status()`, `start_scan()`, etc.) that map to real BlazeGuard routes. This is what the frontend/consumer code actually imports.
-
-## 4. Simple flow
-```
-Frontend / Consumer code
-      |
-      v
-blazeguard_api.get_system_status() <- endpoint function
-      |
-      v
-api_client.get("/system-status") <- core client (adds headers, base URL)
-      |
-      v
-requests library -> BlazeGuard Backend
-      |
-      v
-JSON response / error
-      |
-      v
-Parsed data (or ApiError) returned to caller
-```
-
-## 5. Technologies used
-- **Python `requests` library** (`pip install requests`) — simple, widely used, easy to extend with retries/sessions later.
-- Could swap to **httpx** later if you want async support — structure stays the same either way.
-
-## 6. Active backend contract
-- `BASE_URL` defaults to `http://127.0.0.1:8000` and can be overridden with `BLAZEGUARD_API_URL`.
-- `GET /system-status?eta_seconds=15` samples real CPU/RAM metrics and returns the decision.
-- `POST /decision` accepts `cpu_percent`, `ram_percent`, and `eta_seconds` and returns the decision.
-- Bearer authentication remains optional through `BLAZEGUARD_TOKEN`; the local backend does not require it.
-
-## 7. Files in this prototype
-| File | Purpose |
-|---|---|
-| `api_client.py` | Core GET/POST/PUT/DELETE engine, error handling, auth headers |
-| `blazeguard_endpoints.py` | Named functions frontend/consumer code actually calls |
-| `demo_working.py` | Smoke test against the running local backend |
-
-**Requires:** `pip install requests`
-
-## Run the smoke test
-Start the backend from the repository root, then run `python demo_working.py` from `/api`.
+This is not the future SPPU-to-BlazeGuard API contract. The bearer token is optional in the client, and the FastAPI app does not enforce inbound authentication. Authentication, endpoint definitions, and upstream behavior remain to be designed.
