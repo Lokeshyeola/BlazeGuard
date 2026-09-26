@@ -33,3 +33,27 @@ class Request(Base):
         onupdate=datetime.utcnow,
         nullable=False
     )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="ACTIVE",
+        index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

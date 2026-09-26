@@ -4,9 +4,11 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from backend.api_key_routes import router as api_key_router
 from backend.decision_engine.decision_engine import make_decision
 from backend.monitoring.cpu_monitor import cpu_monitor
 from backend.monitoring.ram_monitor import ram_monitor
+from database.create_tables import create_tables
 
 
 app = FastAPI(title="BlazeGuard")
@@ -20,9 +22,15 @@ app.add_middleware(
         "http://localhost:3000",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+app.include_router(api_key_router)
+
+
+@app.on_event("startup")
+def initialize_database():
+    create_tables()
 
 
 class ServerMetrics(BaseModel):
@@ -75,4 +83,3 @@ async def get_system_status(
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-

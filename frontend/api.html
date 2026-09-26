@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BlazeGuard API Administration</title>
+<link rel="stylesheet" href="api-admin.css"><script src="config.js"></script><script src="api-admin.js" defer></script>
+</head>
+<body><main class="shell">
+<header><p class="eyebrow">BLAZEGUARD · DEVELOPER CONSOLE</p><h1>API key administration</h1><p class="intro">Create and revoke credentials for trusted server-to-server clients.</p></header>
+<section class="panel"><p class="eyebrow">ADMIN ACCESS</p><h2>Administrator authentication</h2><p class="muted">Use the administrator token configured on the BlazeGuard server.</p>
+<form id="auth-form"><label for="admin-token">Server administrator token</label><div class="inline"><input id="admin-token" type="password" autocomplete="current-password" required><button class="button secondary">Connect</button></div></form><p id="auth-message" class="message" role="status"></p></section>
+<section id="management" class="panel" hidden><div class="heading"><div><p class="eyebrow">CREDENTIALS</p><h2>API keys</h2><p class="muted">The secret is shown once at creation. Store it in the trusted client’s server environment.</p></div><button id="generate-key" class="button primary" type="button">Generate API Key</button></div>
+<div id="new-key" class="new-key" hidden><strong>Copy this key now</strong><p>This secret cannot be retrieved later.</p><div class="inline"><code id="generated-key"></code><button id="copy-key" class="button secondary" type="button">Copy key</button></div></div>
+<p id="management-message" class="message" role="status"></p><div class="table-wrap"><table><thead><tr><th>Key ID</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody id="key-list"></tbody></table></div>
+<button id="disconnect" class="text-button" type="button">Disconnect admin session</button></section>
+<footer>BlazeGuard administration · Keep API credentials private.</footer></main></body></html>
