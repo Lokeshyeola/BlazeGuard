@@ -44,12 +44,12 @@ class AdmissionPolicyTests(unittest.TestCase):
 
         with (
             patch(
-                "backend.admission_routes.cpu_monitor.sample",
+                "backend.admission_service.cpu_monitor.sample",
                 new_callable=AsyncMock,
                 return_value={"usage": 0.0, "available": False},
             ),
             patch(
-                "backend.admission_routes.ram_monitor.get_metrics",
+                "backend.admission_service.ram_monitor.get_metrics",
                 return_value={"usage": 20.0, "available": True},
             ),
         ):

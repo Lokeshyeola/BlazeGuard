@@ -50,6 +50,33 @@ def get_next_request(db: Session) -> Request | None:
     )
 
 
+def claim_next_waiting_request(db: Session) -> Request | None:
+    """Atomically claim the earliest waiting request in FIFO order."""
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        request = (
+            db.query(Request)
+            .filter(Request.status == "WAITING")
+            .order_by(
+                Request.queue_position.asc(),
+                Request.created_at.asc(),
+                Request.id.asc(),
+            )
+            .first()
+        )
+        if request is None:
+            db.rollback()
+            return None
+
+        request.status = "PROCESSING"
+        db.commit()
+        db.refresh(request)
+        return request
+    except Exception:
+        db.rollback()
+        raise
+
+
 def get_idempotent_request(
     db: Session,
     user_id: str,

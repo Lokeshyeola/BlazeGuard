@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from database.request_repository import (
     add_request,
+    claim_next_waiting_request,
     get_next_request,
     update_status,
 )
@@ -30,18 +31,8 @@ def get_next_waiting_request(db: Session):
 
 
 def process_next_request(db: Session):
-    """Move the next waiting request to PROCESSING."""
-
-    request = get_next_request(db)
-
-    if request is None:
-        return None
-
-    return update_status(
-        db=db,
-        request_id=request.id,
-        status="PROCESSING",
-    )
+    """Atomically move the earliest waiting request to PROCESSING."""
+    return claim_next_waiting_request(db)
 
 
 def complete_request(db: Session, request_id: int):

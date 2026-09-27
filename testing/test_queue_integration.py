@@ -10,11 +10,13 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from backend.admission_routes import RequestIntake, intake_request, request_status
+from backend.queue_worker import process_next_request_if_allowed
 from database.database import Base
 from database.create_tables import create_tables
 from database.models import Request
 from database.request_repository import update_status
 from queue_management.queue_manager import add_to_queue
+from unittest.mock import patch
 
 
 class QueueIntegrationTests(unittest.TestCase):
@@ -207,6 +209,78 @@ class QueueIntegrationTests(unittest.TestCase):
         self.assertEqual(positions, [1, 2])
         self.assertIn("idempotency_key", columns)
         legacy_engine.dispose()
+
+    def run_worker(self, decision):
+        async def admission():
+            return {"decision": decision, "reason": "TEST"}
+
+        with patch("backend.queue_worker.get_current_admission", new=admission):
+            return asyncio.run(process_next_request_if_allowed(self.db))
+
+    def test_worker_empty_queue_returns_none(self):
+        self.assertIsNone(self.run_worker("ALLOW"))
+
+    def test_worker_claims_waiting_request_and_transitions_to_processing(self):
+        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/claim")
+        claimed = self.run_worker("ALLOW")
+        self.assertEqual(claimed.id, waiting.id)
+        self.assertEqual(claimed.status, "PROCESSING")
+
+    def test_worker_claims_in_fifo_order(self):
+        queued = [
+            add_to_queue(self.db, "active-key-id", f"https://example.test/{number}")
+            for number in range(3)
+        ]
+        claimed = [self.run_worker("ALLOW") for _ in range(3)]
+        self.assertEqual([item.id for item in claimed], [item.id for item in queued])
+        self.assertTrue(all(item.status == "PROCESSING" for item in claimed))
+        self.assertIsNone(self.run_worker("ALLOW"))
+
+    def test_worker_does_not_claim_when_admission_is_not_allow(self):
+        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/held")
+        for decision in ("QUEUE", "REJECT"):
+            with self.subTest(decision=decision):
+                self.assertIsNone(self.run_worker(decision))
+                self.db.refresh(waiting)
+                self.assertEqual(waiting.status, "WAITING")
+
+    def test_worker_does_not_reclaim_processing_or_terminal_requests(self):
+        processing = add_to_queue(
+            self.db, "active-key-id", "https://example.test/processing"
+        )
+        update_status(self.db, processing.id, "PROCESSING")
+
+        cancelled = add_to_queue(self.db, "active-key-id", "https://example.test/cancelled")
+        update_status(self.db, cancelled.id, "CANCELLED")
+
+        completed = add_to_queue(self.db, "active-key-id", "https://example.test/completed")
+        update_status(self.db, completed.id, "PROCESSING")
+        update_status(self.db, completed.id, "COMPLETED")
+
+        failed = add_to_queue(self.db, "active-key-id", "https://example.test/failed")
+        update_status(self.db, failed.id, "PROCESSING")
+        update_status(self.db, failed.id, "FAILED")
+
+        self.assertIsNone(self.run_worker("ALLOW"))
+
+    def test_concurrent_workers_claim_a_request_at_most_once(self):
+        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/concurrent")
+
+        async def admission():
+            return {"decision": "ALLOW", "reason": "TEST"}
+
+        def run_worker():
+            with self.sessions() as session:
+                with patch("backend.queue_worker.get_current_admission", new=admission):
+                    return asyncio.run(process_next_request_if_allowed(session))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: run_worker(), range(2)))
+        claims = [item for item in results if item is not None]
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].id, waiting.id)
+        self.assertEqual(claims[0].status, "PROCESSING")
+        self.assertEqual(sum(item is not None for item in results), 1)
 
 
 if __name__ == "__main__":
