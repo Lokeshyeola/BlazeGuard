@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from backend.admission_routes import RequestIntake, intake_request, request_status
-from backend.queue_worker import process_next_request_if_allowed
+from backend.queue_worker import QueueWorker, process_next_request_if_allowed
 from backend.request_forwarder import (
     ProtectedServiceConfig,
     forward_request,
@@ -393,6 +393,120 @@ class QueueIntegrationTests(unittest.TestCase):
         self.assertEqual(claims[0].id, waiting.id)
         self.assertEqual(claims[0].status, "COMPLETED")
         self.assertEqual(sum(item is not None for item in results), 1)
+
+    def test_automatic_worker_starts_once_and_stops_cleanly(self):
+        calls = []
+
+        async def admission():
+            calls.append(True)
+            return {"decision": "REJECT", "reason": "TEST"}
+
+        async def exercise():
+            worker = QueueWorker(self.sessions, poll_interval_seconds=0.02)
+            with patch("backend.queue_worker.get_current_admission", new=admission):
+                first_task = worker.start()
+                self.assertIs(worker.start(), first_task)
+                await asyncio.sleep(0.06)
+                await worker.stop()
+            self.assertTrue(first_task.done())
+            self.assertIsNone(worker.task)
+
+        asyncio.run(exercise())
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_automatic_worker_keeps_queue_waiting_until_allow(self):
+        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/held")
+
+        async def admission():
+            return {"decision": "QUEUE", "reason": "TEST"}
+
+        async def exercise():
+            worker = QueueWorker(self.sessions, poll_interval_seconds=0.02)
+            with patch("backend.queue_worker.get_current_admission", new=admission):
+                worker.start()
+                await asyncio.sleep(0.06)
+                with self.sessions() as session:
+                    self.assertEqual(session.get(Request, waiting.id).status, "WAITING")
+                await worker.stop()
+
+        asyncio.run(exercise())
+
+    def test_automatic_worker_processes_once_when_admission_becomes_allow(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
+        decisions = iter(("QUEUE", "ALLOW", "ALLOW", "ALLOW"))
+        forwarded_ids = []
+        original_forwarder = forward_request
+
+        async def admission():
+            return {"decision": next(decisions, "ALLOW"), "reason": "TEST"}
+
+        def count_forward(request, config):
+            forwarded_ids.append(request.id)
+            return original_forwarder(request, config)
+
+        async def wait_for_status():
+            for _ in range(200):
+                with self.sessions() as session:
+                    request = session.get(Request, waiting.id)
+                    if request.status in {"COMPLETED", "FAILED"}:
+                        return request.status
+                await asyncio.sleep(0.01)
+            return None
+
+        async def exercise():
+            worker = QueueWorker(
+                self.sessions,
+                poll_interval_seconds=0.02,
+                forwarding_config=ProtectedServiceConfig(self.protected_url),
+            )
+            with (
+                patch("backend.queue_worker.get_current_admission", new=admission),
+                patch("backend.queue_worker.forward_request", new=count_forward),
+            ):
+                worker.start()
+                status = await wait_for_status()
+                await asyncio.sleep(0.06)
+                await worker.stop()
+            return status
+
+        self.assertEqual(asyncio.run(exercise()), "COMPLETED")
+        self.assertEqual(forwarded_ids, [waiting.id])
+
+    def test_automatic_worker_marks_forwarding_failure_failed(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=service-error",
+        )
+
+        async def admission():
+            return {"decision": "ALLOW", "reason": "TEST"}
+
+        async def exercise():
+            worker = QueueWorker(
+                self.sessions,
+                poll_interval_seconds=0.02,
+                forwarding_config=ProtectedServiceConfig(self.protected_url),
+            )
+            with patch("backend.queue_worker.get_current_admission", new=admission):
+                worker.start()
+                for _ in range(200):
+                    with self.sessions() as session:
+                        request = session.get(Request, waiting.id)
+                        if request.status in {"COMPLETED", "FAILED"}:
+                            status = request.status
+                            break
+                    await asyncio.sleep(0.01)
+                else:
+                    status = None
+                await worker.stop()
+            return status
+
+        self.assertEqual(asyncio.run(exercise()), "FAILED")
 
 
 if __name__ == "__main__":

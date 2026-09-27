@@ -1,3 +1,5 @@
+import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Query
@@ -9,10 +11,28 @@ from backend.api_key_routes import router as api_key_router
 from backend.decision_engine.decision_engine import make_decision
 from backend.monitoring.cpu_monitor import cpu_monitor
 from backend.monitoring.ram_monitor import ram_monitor
+from backend.queue_worker import QueueWorker
 from database.create_tables import create_tables
 
 
-app = FastAPI(title="BlazeGuard")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    create_tables()
+    enabled = os.getenv("QUEUE_WORKER_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    worker = QueueWorker() if enabled else None
+    application.state.queue_worker = worker
+    if worker is not None:
+        worker.start()
+    try:
+        yield
+    finally:
+        if worker is not None:
+            await worker.stop()
+
+
+app = FastAPI(title="BlazeGuard", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,11 +48,6 @@ app.add_middleware(
 )
 app.include_router(api_key_router)
 app.include_router(admission_router)
-
-
-@app.on_event("startup")
-def initialize_database():
-    create_tables()
 
 
 class ServerMetrics(BaseModel):

@@ -25,6 +25,7 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         cls.base = f"http://127.0.0.1:{cls.port}"
         env = os.environ.copy()
         env["BLAZEGUARD_ADMIN_TOKEN"] = cls.token
+        env["QUEUE_WORKER_ENABLED"] = "false"
         env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         cls.log_path = cls.work / "server.log"
         cls.log = cls.log_path.open("w+", encoding="utf-8")
