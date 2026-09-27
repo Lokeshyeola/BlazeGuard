@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import os
 
 from backend.admission_policy import decide_admission
 from backend.monitoring.cpu_monitor import cpu_monitor
@@ -25,9 +26,19 @@ async def get_current_admission() -> dict:
         pass
 
     decision = decide_admission(cpu_percent, ram_percent)
+    # TEST/DEMO ONLY: an explicit environment setting may override the real
+    # monitor-based decision for local demonstrations. It is OFF by default.
+    demo_mode = os.getenv("BLAZEGUARD_DEMO_ADMISSION_MODE", "").strip().upper()
+    if demo_mode in {"ALLOW", "QUEUE", "REJECT"}:
+        decision_name = demo_mode
+        reason = f"DEMO_OVERRIDE_{demo_mode}"
+    else:
+        decision_name = decision.admission
+        reason = decision.reason
+
     return {
-        "decision": decision.admission,
-        "reason": decision.reason,
+        "decision": decision_name,
+        "reason": reason,
         "metrics": {
             "cpu_percent": cpu_percent,
             "ram_percent": ram_percent,

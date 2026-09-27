@@ -1,11 +1,15 @@
+import asyncio
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.api_key_routes import get_db, require_api_key
 from backend.admission_service import get_current_admission
+from backend.request_forwarder import forward_request, get_protected_service_config
 from database.models import ApiKey, Request
 from database.request_repository import get_idempotent_request
 from queue_management.queue_manager import add_to_queue
@@ -56,7 +60,27 @@ async def intake_request(
 
     decision = admission["decision"]
     response = {"decision": decision, "reason": admission["reason"]}
-    if decision in {"ALLOW", "REJECT"}:
+    if decision == "ALLOW":
+        forwarded = await asyncio.to_thread(
+            forward_request,
+            SimpleNamespace(
+                request_method=body.method,
+                requested_url=body.requested_url,
+            ),
+            get_protected_service_config(),
+        )
+        result = {
+            **response,
+            "forwarding": {
+                "succeeded": forwarded.succeeded,
+                "status_code": forwarded.status_code,
+            },
+        }
+        if not forwarded.succeeded:
+            result["forwarding"]["error"] = forwarded.error
+            return JSONResponse(status_code=502, content=result)
+        return result
+    if decision == "REJECT":
         return response
     if decision != "QUEUE":
         raise HTTPException(status_code=503, detail="Admission policy returned an invalid decision.")

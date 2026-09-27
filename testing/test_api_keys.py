@@ -127,9 +127,13 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         finally:
             db.close()
         intake = requests.post(request_url, headers=auth, json=request_body, timeout=3)
-        self.assertEqual(intake.status_code, 200)
         intake_payload = intake.json()
         self.assertIn(intake_payload["decision"], {"ALLOW", "QUEUE", "REJECT"})
+        if intake_payload["decision"] == "ALLOW":
+            self.assertEqual(intake.status_code, 502)
+            self.assertFalse(intake_payload["forwarding"]["succeeded"])
+        else:
+            self.assertEqual(intake.status_code, 200)
         db = sqlite3.connect(self.work / "blazeguard.db")
         try:
             after = db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]

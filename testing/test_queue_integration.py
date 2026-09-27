@@ -1,11 +1,13 @@
 import asyncio
 import concurrent.futures
+import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine, func, select, text
@@ -70,24 +72,58 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def submit(self, decision, idempotency_key=None, requested_url=None):
         admission = {"decision": decision, "reason": "TEST_REASON"}
-        return asyncio.run(
-            intake_request(
-                RequestIntake(requested_url=requested_url or self.body.requested_url),
-                self.api_key,
-                self.db,
-                admission,
-                idempotency_key,
+        with patch(
+            "backend.admission_routes.get_protected_service_config",
+            return_value=ProtectedServiceConfig(self.protected_url),
+        ):
+            return asyncio.run(
+                intake_request(
+                    RequestIntake(requested_url=requested_url or self.body.requested_url),
+                    self.api_key,
+                    self.db,
+                    admission,
+                    idempotency_key,
+                )
             )
-        )
 
     def test_allow_and_reject_are_not_queued(self):
         for decision in ("ALLOW", "REJECT"):
             with self.subTest(decision=decision):
-                response = self.submit(decision)
+                response = self.submit(
+                    decision,
+                    requested_url=f"{self.protected_url}/result?prn=123456",
+                )
+                if decision == "ALLOW":
+                    self.assertTrue(response["forwarding"]["succeeded"])
                 self.assertEqual(response["decision"], decision)
                 self.assertEqual(response["reason"], "TEST_REASON")
                 self.assertNotIn("request_id", response)
                 self.assertEqual(self.request_count(), 0)
+
+    def test_allow_immediately_forwards_success_without_queue_record(self):
+        response = self.submit(
+            "ALLOW",
+            requested_url=f"{self.protected_url}/result?prn=123456",
+        )
+        self.assertEqual(response["decision"], "ALLOW")
+        self.assertEqual(
+            response["forwarding"],
+            {"succeeded": True, "status_code": 200},
+        )
+        self.assertEqual(self.request_count(), 0)
+
+    def test_allow_forwarding_failure_preserves_decision_and_reports_upstream_status(self):
+        result = self.submit(
+            "ALLOW",
+            requested_url=f"{self.protected_url}/result?prn=service-error",
+        )
+        self.assertEqual(result.status_code, 502)
+        payload = json.loads(result.body)
+        self.assertEqual(payload["decision"], "ALLOW")
+        self.assertEqual(payload["forwarding"]["succeeded"], False)
+        self.assertEqual(payload["forwarding"]["status_code"], 503)
+        self.assertEqual(payload["forwarding"]["error"], "HTTP_STATUS_ERROR")
+        self.assertEqual(self.request_count(), 0)
 
     def test_queue_creates_one_record_and_status_is_queryable(self):
         response = self.submit("QUEUE")
@@ -284,6 +320,61 @@ class QueueIntegrationTests(unittest.TestCase):
                 self.assertIsNone(self.run_worker(decision))
                 self.db.refresh(waiting)
                 self.assertEqual(waiting.status, "WAITING")
+
+    def test_worker_respects_demo_queue_override(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
+        with (
+            patch.dict(os.environ, {"BLAZEGUARD_DEMO_ADMISSION_MODE": "QUEUE"}),
+            patch(
+                "backend.admission_service.cpu_monitor.sample",
+                new_callable=AsyncMock,
+                return_value={"usage": 10.0, "available": True},
+            ),
+            patch(
+                "backend.admission_service.ram_monitor.get_metrics",
+                return_value={"usage": 10.0, "available": True},
+            ),
+        ):
+            result = asyncio.run(
+                process_next_request_if_allowed(
+                    self.db,
+                    ProtectedServiceConfig(self.protected_url),
+                )
+            )
+        self.assertIsNone(result)
+        self.db.refresh(waiting)
+        self.assertEqual(waiting.status, "WAITING")
+
+    def test_worker_respects_demo_allow_override_and_processes_waiting_request(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
+        with (
+            patch.dict(os.environ, {"BLAZEGUARD_DEMO_ADMISSION_MODE": "ALLOW"}),
+            patch(
+                "backend.admission_service.cpu_monitor.sample",
+                new_callable=AsyncMock,
+                return_value={"usage": 99.0, "available": True},
+            ),
+            patch(
+                "backend.admission_service.ram_monitor.get_metrics",
+                return_value={"usage": 99.0, "available": True},
+            ),
+        ):
+            result = asyncio.run(
+                process_next_request_if_allowed(
+                    self.db,
+                    ProtectedServiceConfig(self.protected_url),
+                )
+            )
+        self.assertEqual(result.id, waiting.id)
+        self.assertEqual(result.status, "COMPLETED")
 
     def test_worker_does_not_reclaim_processing_or_terminal_requests(self):
         processing = add_to_queue(
