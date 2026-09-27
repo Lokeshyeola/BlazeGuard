@@ -9,6 +9,7 @@ def add_request(
     user_id: str,
     requested_url: str,
     idempotency_key: str | None = None,
+    request_method: str = "GET",
 ) -> Request:
     try:
         db.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -28,6 +29,7 @@ def add_request(
         request = Request(
             user_id=user_id,
             requested_url=requested_url,
+            request_method=request_method,
             queue_position=current_max + 1,
             idempotency_key=idempotency_key,
             status="WAITING",

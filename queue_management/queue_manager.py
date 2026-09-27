@@ -13,6 +13,7 @@ def add_to_queue(
     user_id: str,
     requested_url: str,
     idempotency_key: str | None = None,
+    request_method: str = "GET",
 ):
     """Add a new request to the FIFO queue."""
 
@@ -21,6 +22,7 @@ def add_to_queue(
         user_id=user_id,
         requested_url=requested_url,
         idempotency_key=idempotency_key,
+        request_method=request_method,
     )
 
 

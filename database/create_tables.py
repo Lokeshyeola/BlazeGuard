@@ -23,6 +23,11 @@ def create_tables(target_engine=engine):
                 connection.exec_driver_sql(
                     "ALTER TABLE requests ADD COLUMN idempotency_key VARCHAR(128)"
                 )
+            if "request_method" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE requests ADD COLUMN request_method "
+                    "VARCHAR(10) NOT NULL DEFAULT 'GET'"
+                )
             index_exists = connection.exec_driver_sql(
                 "SELECT 1 FROM sqlite_master WHERE type='index' "
                 "AND name='uq_requests_waiting_queue_position'"

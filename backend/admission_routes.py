@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -14,6 +16,7 @@ router = APIRouter(prefix="/api/v1")
 
 class RequestIntake(BaseModel):
     requested_url: str = Field(min_length=1, max_length=500)
+    method: Literal["GET"] = "GET"
 
 
 @router.get("/admission", dependencies=[Depends(require_api_key)])
@@ -64,6 +67,7 @@ async def intake_request(
             api_key.id,
             body.requested_url,
             idempotency_key,
+            body.method,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

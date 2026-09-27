@@ -1,9 +1,11 @@
 import asyncio
 import concurrent.futures
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine, func, select, text
@@ -11,15 +13,40 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.admission_routes import RequestIntake, intake_request, request_status
 from backend.queue_worker import process_next_request_if_allowed
+from backend.request_forwarder import (
+    ProtectedServiceConfig,
+    forward_request,
+)
 from database.database import Base
 from database.create_tables import create_tables
 from database.models import Request
 from database.request_repository import update_status
 from queue_management.queue_manager import add_to_queue
-from unittest.mock import patch
+from testing.fake_protected_result_server import (
+    ProtectedResultHandler,
+    ProtectedResultServer,
+)
 
 
 class QueueIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.protected_server = ProtectedResultServer(
+            ("127.0.0.1", 0), ProtectedResultHandler
+        )
+        cls.protected_thread = threading.Thread(
+            target=cls.protected_server.serve_forever,
+            daemon=True,
+        )
+        cls.protected_thread.start()
+        cls.protected_url = f"http://127.0.0.1:{cls.protected_server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.protected_server.shutdown()
+        cls.protected_server.server_close()
+        cls.protected_thread.join(timeout=5)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="blazeguard-queue-test-")
         database_path = Path(self.temp.name) / "test.db"
@@ -208,32 +235,46 @@ class QueueIntegrationTests(unittest.TestCase):
             }
         self.assertEqual(positions, [1, 2])
         self.assertIn("idempotency_key", columns)
+        self.assertIn("request_method", columns)
         legacy_engine.dispose()
 
-    def run_worker(self, decision):
+    def run_worker(self, decision, forwarding_config=None):
         async def admission():
             return {"decision": decision, "reason": "TEST"}
 
         with patch("backend.queue_worker.get_current_admission", new=admission):
-            return asyncio.run(process_next_request_if_allowed(self.db))
+            return asyncio.run(
+                process_next_request_if_allowed(
+                    self.db,
+                    forwarding_config or ProtectedServiceConfig(self.protected_url),
+                )
+            )
 
     def test_worker_empty_queue_returns_none(self):
         self.assertIsNone(self.run_worker("ALLOW"))
 
-    def test_worker_claims_waiting_request_and_transitions_to_processing(self):
-        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/claim")
+    def test_worker_forwards_claimed_request_and_completes_it(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
         claimed = self.run_worker("ALLOW")
         self.assertEqual(claimed.id, waiting.id)
-        self.assertEqual(claimed.status, "PROCESSING")
+        self.assertEqual(claimed.status, "COMPLETED")
 
     def test_worker_claims_in_fifo_order(self):
         queued = [
-            add_to_queue(self.db, "active-key-id", f"https://example.test/{number}")
+            add_to_queue(
+                self.db,
+                "active-key-id",
+                f"{self.protected_url}/result?prn={number}",
+            )
             for number in range(3)
         ]
         claimed = [self.run_worker("ALLOW") for _ in range(3)]
         self.assertEqual([item.id for item in claimed], [item.id for item in queued])
-        self.assertTrue(all(item.status == "PROCESSING" for item in claimed))
+        self.assertTrue(all(item.status == "COMPLETED" for item in claimed))
         self.assertIsNone(self.run_worker("ALLOW"))
 
     def test_worker_does_not_claim_when_admission_is_not_allow(self):
@@ -263,8 +304,74 @@ class QueueIntegrationTests(unittest.TestCase):
 
         self.assertIsNone(self.run_worker("ALLOW"))
 
+    def test_forwarder_sends_stored_path_and_query_to_configured_service(self):
+        request = SimpleNamespace(
+            request_method="GET",
+            requested_url="http://untrusted.invalid/result?prn=123456",
+        )
+        result = forward_request(
+            request,
+            ProtectedServiceConfig(self.protected_url),
+        )
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.status_code, 200)
+
+    def test_forwarder_reports_protected_service_failure(self):
+        request = SimpleNamespace(
+            request_method="GET",
+            requested_url="/result?prn=service-error",
+        )
+        result = forward_request(
+            request,
+            ProtectedServiceConfig(self.protected_url),
+        )
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.status_code, 503)
+
+    def test_forwarder_enforces_timeout(self):
+        request = SimpleNamespace(
+            request_method="GET",
+            requested_url="/result?prn=slow",
+        )
+        result = forward_request(
+            request,
+            ProtectedServiceConfig(self.protected_url, timeout_seconds=0.05),
+        )
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.error, "TIMEOUT")
+
+    def test_successful_forwarding_completes_claimed_request(self):
+        queued = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
+        completed = self.run_worker(
+            "ALLOW",
+            ProtectedServiceConfig(self.protected_url),
+        )
+        self.assertEqual(completed.id, queued.id)
+        self.assertEqual(completed.status, "COMPLETED")
+
+    def test_failed_forwarding_marks_claimed_request_failed(self):
+        queued = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=service-error",
+        )
+        failed = self.run_worker(
+            "ALLOW",
+            ProtectedServiceConfig(self.protected_url),
+        )
+        self.assertEqual(failed.id, queued.id)
+        self.assertEqual(failed.status, "FAILED")
+
     def test_concurrent_workers_claim_a_request_at_most_once(self):
-        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/concurrent")
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=123456",
+        )
 
         async def admission():
             return {"decision": "ALLOW", "reason": "TEST"}
@@ -272,14 +379,19 @@ class QueueIntegrationTests(unittest.TestCase):
         def run_worker():
             with self.sessions() as session:
                 with patch("backend.queue_worker.get_current_admission", new=admission):
-                    return asyncio.run(process_next_request_if_allowed(session))
+                    return asyncio.run(
+                        process_next_request_if_allowed(
+                            session,
+                            ProtectedServiceConfig(self.protected_url),
+                        )
+                    )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: run_worker(), range(2)))
         claims = [item for item in results if item is not None]
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0].id, waiting.id)
-        self.assertEqual(claims[0].status, "PROCESSING")
+        self.assertEqual(claims[0].status, "COMPLETED")
         self.assertEqual(sum(item is not None for item in results), 1)
 
 

@@ -33,7 +33,7 @@ A client with an active BlazeGuard API key may call GET /api/v1/admission with A
 
 POST /api/v1/requests accepts JSON containing `requested_url` and the same bearer API key. ALLOW and REJECT responses include the decision and reason without creating a queue record. QUEUE creates a persistent WAITING request and returns `request_id`, `queue_position`, and status. An optional `Idempotency-Key` header makes queued retries return the original request; reusing that key for a different URL returns 409. GET /api/v1/requests/{request_id} returns the status and queue position to the API key that created the request.
 
-The internal `backend.queue_worker.process_next_request_if_allowed` performs one worker cycle. It checks the current server-side admission policy and atomically claims the next FIFO WAITING request only when the result is ALLOW, transitioning it to PROCESSING. QUEUE, REJECT, and an empty queue produce no claim. No worker scheduler, upstream forwarding, or SPPU integration is active yet.
+The internal `backend.queue_worker.process_next_request_if_allowed` performs one worker cycle. It checks the current server-side admission policy and atomically claims the next FIFO WAITING request only when the result is ALLOW, transitioning it to PROCESSING. It then forwards the stored method/path/query to the host configured by `PROTECTED_RESULT_SERVICE_URL` and marks the request COMPLETED for a successful response or FAILED for an error/timeout. QUEUE, REJECT, and an empty queue produce no claim. The forwarding timeout is controlled by `PROTECTED_RESULT_TIMEOUT_SECONDS` (default 5 seconds). The integration tests use a local fake protected result server; BlazeGuard does not implement result lookup or calculation and is not connected to a real SPPU/government server. No worker scheduler is configured.
 
 ## API key lifecycle
 
@@ -46,7 +46,7 @@ Management endpoints require the server-side BLAZEGUARD_ADMIN_TOKEN:
 
 Keys use a cryptographically secure random secret and random lookup identifier. Only the SHA-256 digest is stored. Each connection request checks the active database record and uses a constant-time digest comparison. Revoked keys are rejected immediately and cannot be reactivated. Lost keys must be replaced.
 
-This is a standalone credential-management foundation. It does not implement upstream forwarding or SPPU integration. A future SPPU backend may call BlazeGuard using a server-side secret; no browser integration is implemented.
+This is a standalone credential-management foundation. It does not implement result processing or real SPPU integration. A future SPPU backend may call BlazeGuard using a server-side secret; no browser integration is implemented.
 
 ## Future integration
 
