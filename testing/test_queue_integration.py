@@ -1,0 +1,213 @@
+import asyncio
+import concurrent.futures
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from fastapi import HTTPException
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.orm import sessionmaker
+
+from backend.admission_routes import RequestIntake, intake_request, request_status
+from database.database import Base
+from database.create_tables import create_tables
+from database.models import Request
+from database.request_repository import update_status
+from queue_management.queue_manager import add_to_queue
+
+
+class QueueIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="blazeguard-queue-test-")
+        database_path = Path(self.temp.name) / "test.db"
+        self.engine = create_engine(
+            f"sqlite:///{database_path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
+        Base.metadata.create_all(self.engine)
+        self.sessions = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
+        self.db = self.sessions()
+        self.api_key = SimpleNamespace(id="active-key-id")
+        self.body = RequestIntake(requested_url="https://example.test/resource")
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+        self.temp.cleanup()
+
+    def request_count(self):
+        return self.db.scalar(select(func.count()).select_from(Request))
+
+    def submit(self, decision, idempotency_key=None, requested_url=None):
+        admission = {"decision": decision, "reason": "TEST_REASON"}
+        return asyncio.run(
+            intake_request(
+                RequestIntake(requested_url=requested_url or self.body.requested_url),
+                self.api_key,
+                self.db,
+                admission,
+                idempotency_key,
+            )
+        )
+
+    def test_allow_and_reject_are_not_queued(self):
+        for decision in ("ALLOW", "REJECT"):
+            with self.subTest(decision=decision):
+                response = self.submit(decision)
+                self.assertEqual(response["decision"], decision)
+                self.assertEqual(response["reason"], "TEST_REASON")
+                self.assertNotIn("request_id", response)
+                self.assertEqual(self.request_count(), 0)
+
+    def test_queue_creates_one_record_and_status_is_queryable(self):
+        response = self.submit("QUEUE")
+        self.assertEqual(response["decision"], "QUEUE")
+        self.assertEqual(response["status"], "WAITING")
+        self.assertEqual(response["queue_position"], 1)
+        self.assertEqual(self.request_count(), 1)
+
+        status = request_status(int(response["request_id"]), self.api_key, self.db)
+        self.assertEqual(
+            status,
+            {
+                "request_id": response["request_id"],
+                "status": "WAITING",
+                "queue_position": 1,
+            },
+        )
+        with self.assertRaises(HTTPException) as missing:
+            request_status(999, self.api_key, self.db)
+        self.assertEqual(missing.exception.status_code, 404)
+        with self.assertRaises(HTTPException) as wrong_owner:
+            request_status(int(response["request_id"]), SimpleNamespace(id="another-key"), self.db)
+        self.assertEqual(wrong_owner.exception.status_code, 404)
+
+    def test_request_ids_and_queue_positions_are_unique_and_ordered(self):
+        responses = [self.submit("QUEUE") for _ in range(5)]
+        ids = [response["request_id"] for response in responses]
+        positions = [response["queue_position"] for response in responses]
+        self.assertEqual(len(set(ids)), 5)
+        self.assertEqual(positions, [1, 2, 3, 4, 5])
+
+    def test_idempotent_retry_returns_same_queue_record(self):
+        first = self.submit("QUEUE", "retry-123")
+        retry = self.submit("QUEUE", "retry-123")
+        self.assertEqual(retry["request_id"], first["request_id"])
+        self.assertEqual(retry["queue_position"], first["queue_position"])
+        self.assertEqual(self.request_count(), 1)
+        with self.assertRaises(HTTPException) as conflict:
+            self.submit("QUEUE", "retry-123", "https://example.test/other")
+        self.assertEqual(conflict.exception.status_code, 409)
+
+    def test_concurrent_duplicate_enqueue_returns_one_record(self):
+        def enqueue(_):
+            with self.sessions() as session:
+                record = add_to_queue(
+                    session,
+                    "active-key-id",
+                    "https://example.test/resource",
+                    "same-client-operation",
+                )
+                return record.id, record.queue_position
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            values = list(pool.map(enqueue, range(8)))
+        self.assertEqual(len({request_id for request_id, _ in values}), 1)
+        self.assertEqual(len({position for _, position in values}), 1)
+        self.assertEqual(self.request_count(), 1)
+
+    def test_concurrent_enqueues_receive_unique_sequential_positions(self):
+        def enqueue(_):
+            with self.sessions() as session:
+                record = add_to_queue(session, "active-key-id", "https://example.test/resource")
+                return record.id, record.queue_position
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            values = list(pool.map(enqueue, range(12)))
+        ids, positions = zip(*values)
+        self.assertEqual(len(set(ids)), 12)
+        self.assertEqual(sorted(positions), list(range(1, 13)))
+        self.assertEqual(self.request_count(), 12)
+
+    def test_invalid_and_valid_status_transitions(self):
+        record = add_to_queue(self.db, "active-key-id", "https://example.test/resource")
+        with self.assertRaisesRegex(ValueError, "Invalid request status transition"):
+            update_status(self.db, record.id, "COMPLETED")
+        self.assertEqual(update_status(self.db, record.id, "PROCESSING").status, "PROCESSING")
+        self.assertEqual(update_status(self.db, record.id, "COMPLETED").status, "COMPLETED")
+        with self.assertRaisesRegex(ValueError, "Invalid request status transition"):
+            update_status(self.db, record.id, "FAILED")
+        with self.assertRaisesRegex(ValueError, "Unknown request status"):
+            update_status(self.db, record.id, "UNKNOWN")
+
+        waiting = add_to_queue(self.db, "active-key-id", "https://example.test/waiting")
+        self.assertEqual(update_status(self.db, waiting.id, "CANCELLED").status, "CANCELLED")
+        processing = add_to_queue(self.db, "active-key-id", "https://example.test/processing")
+        update_status(self.db, processing.id, "PROCESSING")
+        self.assertEqual(update_status(self.db, processing.id, "FAILED").status, "FAILED")
+        processing_again = add_to_queue(
+            self.db, "active-key-id", "https://example.test/processing-again"
+        )
+        update_status(self.db, processing_again.id, "PROCESSING")
+        self.assertEqual(
+            update_status(self.db, processing_again.id, "CANCELLED").status,
+            "CANCELLED",
+        )
+
+    def test_concurrent_status_transitions_allow_only_one_winner(self):
+        record = add_to_queue(self.db, "active-key-id", "https://example.test/race")
+        update_status(self.db, record.id, "PROCESSING")
+
+        def transition(target_status):
+            with self.sessions() as session:
+                try:
+                    return update_status(session, record.id, target_status).status
+                except ValueError:
+                    return "REJECTED"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(transition, ("COMPLETED", "FAILED")))
+        self.assertEqual(results.count("REJECTED"), 1)
+        self.assertEqual(results.count("COMPLETED") + results.count("FAILED"), 1)
+        with self.sessions() as session:
+            final_status = session.get(Request, record.id).status
+        self.assertIn(final_status, {"COMPLETED", "FAILED"})
+        self.assertNotIn("PROCESSING", results)
+
+    def test_existing_duplicate_waiting_positions_are_migrated(self):
+        legacy_engine = create_engine(
+            f"sqlite:///{Path(self.temp.name) / 'legacy.db'}",
+            connect_args={"check_same_thread": False},
+        )
+        with legacy_engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE requests ("
+                "id INTEGER PRIMARY KEY, user_id VARCHAR(100) NOT NULL, "
+                "requested_url VARCHAR(500) NOT NULL, queue_position INTEGER NOT NULL, "
+                "status VARCHAR(20) NOT NULL, created_at DATETIME NOT NULL, "
+                "updated_at DATETIME NOT NULL)"
+            ))
+            connection.execute(text(
+                "INSERT INTO requests "
+                "(id,user_id,requested_url,queue_position,status,created_at,updated_at) "
+                "VALUES (1,'key','https://example.test/1',1,'WAITING',"
+                "'2026-01-01','2026-01-01'), (2,'key','https://example.test/2',1,'WAITING',"
+                "'2026-01-02','2026-01-02')"
+            ))
+
+        create_tables(legacy_engine)
+        with legacy_engine.connect() as connection:
+            positions = connection.execute(text(
+                "SELECT queue_position FROM requests WHERE status='WAITING' ORDER BY id"
+            )).scalars().all()
+            columns = {
+                row[1] for row in connection.exec_driver_sql("PRAGMA table_info(requests)")
+            }
+        self.assertEqual(positions, [1, 2])
+        self.assertIn("idempotency_key", columns)
+        legacy_engine.dispose()
+
+
+if __name__ == "__main__":
+    unittest.main()

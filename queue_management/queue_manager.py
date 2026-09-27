@@ -11,21 +11,15 @@ def add_to_queue(
     db: Session,
     user_id: str,
     requested_url: str,
+    idempotency_key: str | None = None,
 ):
     """Add a new request to the FIFO queue."""
-
-    next_request = get_next_request(db)
-
-    if next_request:
-        queue_position = next_request.queue_position + 1
-    else:
-        queue_position = 1
 
     return add_request(
         db=db,
         user_id=user_id,
         requested_url=requested_url,
-        queue_position=queue_position,
+        idempotency_key=idempotency_key,
     )
 
 

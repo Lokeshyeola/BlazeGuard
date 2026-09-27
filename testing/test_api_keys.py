@@ -85,6 +85,20 @@ class ApiKeyLifecycleTests(unittest.TestCase):
             requests.get(self.base + "/api/v1/admission", timeout=3).status_code,
             401,
         )
+        request_url = self.base + "/api/v1/requests"
+        status_url = self.base + "/api/v1/requests/not-a-number"
+        request_body = {"requested_url": "https://example.test/resource"}
+        self.assertEqual(requests.post(request_url, json=request_body, timeout=3).status_code, 401)
+        self.assertEqual(requests.get(status_url, timeout=3).status_code, 401)
+        self.assertEqual(
+            requests.post(
+                request_url,
+                headers={"Authorization": "Bearer BG_invalid_invalid"},
+                json=request_body,
+                timeout=3,
+            ).status_code,
+            401,
+        )
         created = requests.post(
             self.base + "/api/v1/api-keys", headers=admin, timeout=3
         )
@@ -100,6 +114,39 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         self.assertIn("cpu_percent", payload["metrics"])
         self.assertIn("ram_percent", payload["metrics"])
         self.assertNotIn("api_key", payload)
+        self.assertEqual(requests.get(status_url, headers=auth, timeout=3).status_code, 422)
+        self.assertEqual(
+            requests.get(self.base + "/api/v1/requests/999999", headers=auth, timeout=3).status_code,
+            404,
+        )
+
+        db = sqlite3.connect(self.work / "blazeguard.db")
+        try:
+            before = db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        finally:
+            db.close()
+        intake = requests.post(request_url, headers=auth, json=request_body, timeout=3)
+        self.assertEqual(intake.status_code, 200)
+        intake_payload = intake.json()
+        self.assertIn(intake_payload["decision"], {"ALLOW", "QUEUE", "REJECT"})
+        db = sqlite3.connect(self.work / "blazeguard.db")
+        try:
+            after = db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        finally:
+            db.close()
+        if intake_payload["decision"] == "QUEUE":
+            self.assertEqual(after, before + 1)
+            self.assertEqual(intake_payload["status"], "WAITING")
+            self.assertGreaterEqual(intake_payload["queue_position"], 1)
+            status_response = requests.get(
+                self.base + "/api/v1/requests/" + intake_payload["request_id"],
+                headers=auth,
+                timeout=3,
+            )
+            self.assertEqual(status_response.status_code, 200)
+            self.assertEqual(status_response.json()["status"], "WAITING")
+        else:
+            self.assertEqual(after, before)
 
         key_id = created.json()["key_id"]
         requests.delete(
@@ -109,6 +156,10 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             requests.get(self.base + "/api/v1/admission", headers=auth, timeout=3).status_code,
+            401,
+        )
+        self.assertEqual(
+            requests.post(request_url, headers=auth, json=request_body, timeout=3).status_code,
             401,
         )
 
