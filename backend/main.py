@@ -4,6 +4,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from backend.admission_routes import router as admission_router
 from backend.api_key_routes import router as api_key_router
 from backend.decision_engine.decision_engine import make_decision
 from backend.monitoring.cpu_monitor import cpu_monitor
@@ -26,6 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(api_key_router)
+app.include_router(admission_router)
 
 
 @app.on_event("startup")

@@ -1,25 +1,39 @@
+import math
 import os
+
 import psutil
 
 
 class CpuMonitor:
     def __init__(self):
         self.current_usage = 0.0
+        self.available = False
         self.cores = os.cpu_count() or 1
         self._process = psutil.Process(os.getpid())
 
     async def sample(self) -> dict:
         try:
-            self.current_usage = min(
-                100.0,
-                max(0.0, self._process.cpu_percent(interval=None)),
-            )
+            measured_usage = self._process.cpu_percent(interval=None)
+            if not math.isfinite(measured_usage) or measured_usage < 0:
+                raise ValueError("CPU monitor returned an invalid sample.")
+            self.current_usage = min(100.0, measured_usage)
+            self.available = True
         except Exception:
-            load_avg = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
-            self.current_usage = min(
-                100.0,
-                (load_avg / self.cores) * 100.0,
-            )
+            try:
+                if not hasattr(os, "getloadavg"):
+                    raise RuntimeError("CPU load average is unavailable.")
+                load_avg = os.getloadavg()[0]
+                if not math.isfinite(load_avg) or load_avg < 0:
+                    raise ValueError("CPU load average is invalid.")
+                self.current_usage = min(
+                    100.0,
+                    (load_avg / self.cores) * 100.0,
+                )
+                # A load-average estimate is not an actual CPU utilization reading.
+                self.available = False
+            except Exception:
+                self.current_usage = 0.0
+                self.available = False
 
         return self.get_metrics()
 
@@ -32,6 +46,7 @@ class CpuMonitor:
 
         return {
             "usage": round(self.current_usage, 2),
+            "available": self.available,
             "cores": self.cores,
             "loadAvg": load_avg,
         }

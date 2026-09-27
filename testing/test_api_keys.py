@@ -79,6 +79,39 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         self.log.flush()
         self.assertNotIn(secret, self.log_path.read_text(encoding="utf-8"))
 
+    def test_admission_route_requires_active_api_key(self):
+        admin = {"Authorization": "Bearer " + self.token}
+        self.assertEqual(
+            requests.get(self.base + "/api/v1/admission", timeout=3).status_code,
+            401,
+        )
+        created = requests.post(
+            self.base + "/api/v1/api-keys", headers=admin, timeout=3
+        )
+        self.assertEqual(created.status_code, 201)
+        api_key = created.json()["api_key"]
+        auth = {"Authorization": "Bearer " + api_key}
+        response = requests.get(
+            self.base + "/api/v1/admission", headers=auth, timeout=3
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn(payload["admission"], {"ALLOW", "QUEUE", "REJECT"})
+        self.assertIn("cpu_percent", payload["metrics"])
+        self.assertIn("ram_percent", payload["metrics"])
+        self.assertNotIn("api_key", payload)
+
+        key_id = created.json()["key_id"]
+        requests.delete(
+            self.base + "/api/v1/api-keys/" + key_id,
+            headers=admin,
+            timeout=3,
+        )
+        self.assertEqual(
+            requests.get(self.base + "/api/v1/admission", headers=auth, timeout=3).status_code,
+            401,
+        )
+
     def test_existing_root_still_works(self):
         self.assertEqual(requests.get(self.base + "/", timeout=3).json()["status"], "active")
 

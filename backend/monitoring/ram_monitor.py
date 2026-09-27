@@ -1,5 +1,7 @@
+import math
+from typing import Any, Dict
+
 import psutil
-from typing import Dict, Any
 
 
 class RamMonitor:
@@ -8,15 +10,31 @@ class RamMonitor:
         total_bytes = mem.total
         used_bytes = mem.used
         available_bytes = mem.available
-        usage_percentage = (
-            (used_bytes / total_bytes) * 100.0 if total_bytes > 0 else 0.0
+        values_valid = all(
+            isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value >= 0
+            for value in (total_bytes, used_bytes, available_bytes)
         )
+        is_available = (
+            values_valid
+            and total_bytes > 0
+            and used_bytes <= total_bytes
+            and available_bytes <= total_bytes
+        )
+        usage_percentage = (
+            (used_bytes / total_bytes) * 100.0
+            if is_available
+            else 0.0
+        )
+        is_available = is_available and math.isfinite(usage_percentage)
 
         return {
             "totalBytes": total_bytes,
             "usedBytes": used_bytes,
             "freeBytes": available_bytes,
-            "usage": round(usage_percentage, 2),
+            "usage": round(usage_percentage, 2) if is_available else None,
+            "available": is_available,
         }
 
     def calculate_health_score(self) -> float:

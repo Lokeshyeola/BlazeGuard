@@ -4,8 +4,9 @@ BlazeGuard is a prototype backend for monitoring service load and making traffic
 
 ## Repository components
 
-- Core FastAPI prototype: backend/main.py with /, /decision, and /system-status.
-- Decision engine: backend/decision_engine/decision_engine.py; retains existing NORMAL, WARNING, CRITICAL, and DELAY thresholds.
+- Core FastAPI prototype: backend/main.py with /, /decision, /system-status, and authenticated /api/v1/admission.
+- Admission policy: backend/admission_policy.py returns ALLOW below 75%, QUEUE from 75% through below 90%, and REJECT at 90% or above. Decisions use trusted server-side CPU/RAM samples; missing or invalid monitoring data returns REJECT with MONITORING_UNAVAILABLE.
+- Decision engine: backend/decision_engine/decision_engine.py retains its separate NORMAL, WARNING, CRITICAL, and DELAY labels for the existing legacy endpoints.
 - Monitoring: backend/monitoring/ contains CPU, RAM, request-rate, response-time, and network metric prototypes. The root FastAPI app uses CPU/RAM sampling. backend/monitoring/main.py is an unfinished alternate application and is not the supported entry point.
 - Queue management: queue_management/ contains SQLAlchemy queue operations, separate from and not currently wired into FastAPI.
 - Database: database/ contains SQLite setup, Request and ApiKey models, table creation, and repository functions.
@@ -25,6 +26,10 @@ Requires Python and pip. From the repository root:
 6. Open http://localhost:5500/api.html. API URL: http://127.0.0.1:8000.
 
 The admin token is kept in page memory only and sent to the local API in an Authorization header. Never put it or generated API keys in source code, URLs, or logs.
+
+## Admission endpoint
+
+A client with an active BlazeGuard API key may call GET /api/v1/admission with Authorization: Bearer <API_KEY>. The endpoint samples CPU and RAM on BlazeGuard itself; it does not accept client-supplied metrics. It returns an admission of ALLOW, QUEUE, or REJECT with a reason. Missing, unavailable, or invalid measurements fail closed as REJECT / MONITORING_UNAVAILABLE. This endpoint does not enqueue or forward requests.
 
 ## API key lifecycle
 
