@@ -21,6 +21,11 @@ class Request(Base):
 
     queue_position: Mapped[int] = mapped_column(Integer, nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    failure_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    failure_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    upstream_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     status: Mapped[str] = mapped_column(
         String(20),

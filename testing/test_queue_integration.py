@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.admission_routes import RequestIntake, intake_request, request_status
 from backend.queue_worker import QueueWorker, process_next_request_if_allowed
 from backend.request_forwarder import (
+    ForwardResult,
     ProtectedServiceConfig,
     forward_request,
 )
@@ -139,6 +140,11 @@ class QueueIntegrationTests(unittest.TestCase):
                 "request_id": response["request_id"],
                 "status": "WAITING",
                 "queue_position": 1,
+                "attempt_count": 0,
+                "failure_category": None,
+                "failure_message": None,
+                "failure_at": None,
+                "upstream_status_code": None,
             },
         )
         with self.assertRaises(HTTPException) as missing:
@@ -193,6 +199,28 @@ class QueueIntegrationTests(unittest.TestCase):
         ids, positions = zip(*values)
         self.assertEqual(len(set(ids)), 12)
         self.assertEqual(sorted(positions), list(range(1, 13)))
+        self.assertEqual(self.request_count(), 12)
+
+    def test_concurrent_intake_calls_keep_unique_ids_positions_and_rows(self):
+        def intake(index):
+            with self.sessions() as session:
+                response = asyncio.run(
+                    intake_request(
+                        RequestIntake(requested_url=f"/resource/{index}"),
+                        self.api_key,
+                        session,
+                        {"decision": "QUEUE", "reason": "TEST"},
+                        None,
+                    )
+                )
+                return response["request_id"], response["queue_position"], response["status"]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            values = list(pool.map(intake, range(12)))
+        ids, positions, statuses = zip(*values)
+        self.assertEqual(len(set(ids)), 12)
+        self.assertEqual(sorted(positions), list(range(1, 13)))
+        self.assertEqual(set(statuses), {"WAITING"})
         self.assertEqual(self.request_count(), 12)
 
     def test_invalid_and_valid_status_transitions(self):
@@ -272,6 +300,9 @@ class QueueIntegrationTests(unittest.TestCase):
         self.assertEqual(positions, [1, 2])
         self.assertIn("idempotency_key", columns)
         self.assertIn("request_method", columns)
+        self.assertIn("attempt_count", columns)
+        self.assertIn("failure_category", columns)
+        self.assertIn("upstream_status_code", columns)
         legacy_engine.dispose()
 
     def run_worker(self, decision, forwarding_config=None):
@@ -328,7 +359,11 @@ class QueueIntegrationTests(unittest.TestCase):
             f"{self.protected_url}/result?prn=123456",
         )
         with (
-            patch.dict(os.environ, {"BLAZEGUARD_DEMO_ADMISSION_MODE": "QUEUE"}),
+            patch.dict(
+                os.environ,
+                {"BLAZEGUARD_DEMO_ADMISSION_MODE": "QUEUE"},
+                clear=True,
+            ),
             patch(
                 "backend.admission_service.cpu_monitor.sample",
                 new_callable=AsyncMock,
@@ -339,12 +374,19 @@ class QueueIntegrationTests(unittest.TestCase):
                 return_value={"usage": 10.0, "available": True},
             ),
         ):
-            result = asyncio.run(
-                process_next_request_if_allowed(
-                    self.db,
-                    ProtectedServiceConfig(self.protected_url),
+            self.assertEqual(os.environ.get("BLAZEGUARD_DEMO_ADMISSION_MODE"), "QUEUE")
+            from backend.admission_service import get_current_admission
+            admission = asyncio.run(get_current_admission())
+            self.assertEqual(admission["decision"], "QUEUE")
+            async def forced_queue():
+                return admission
+            with patch("backend.queue_worker.get_current_admission", new=forced_queue):
+                result = asyncio.run(
+                    process_next_request_if_allowed(
+                        self.db,
+                        ProtectedServiceConfig(self.protected_url),
+                    )
                 )
-            )
         self.assertIsNone(result)
         self.db.refresh(waiting)
         self.assertEqual(waiting.status, "WAITING")
@@ -356,7 +398,11 @@ class QueueIntegrationTests(unittest.TestCase):
             f"{self.protected_url}/result?prn=123456",
         )
         with (
-            patch.dict(os.environ, {"BLAZEGUARD_DEMO_ADMISSION_MODE": "ALLOW"}),
+            patch.dict(
+                os.environ,
+                {"BLAZEGUARD_DEMO_ADMISSION_MODE": "ALLOW"},
+                clear=True,
+            ),
             patch(
                 "backend.admission_service.cpu_monitor.sample",
                 new_callable=AsyncMock,
@@ -407,6 +453,16 @@ class QueueIntegrationTests(unittest.TestCase):
         self.assertTrue(result.succeeded)
         self.assertEqual(result.status_code, 200)
 
+    def test_forwarder_rejects_encoded_path_traversal(self):
+        for path in ("/%2e%2e/private", "/%252e%252e/private", "//untrusted.invalid/path"):
+            with self.subTest(path=path):
+                result = forward_request(
+                    SimpleNamespace(request_method="GET", requested_url=path),
+                    ProtectedServiceConfig(self.protected_url),
+                )
+                self.assertFalse(result.succeeded)
+                self.assertEqual(result.error, "INVALID_TARGET")
+
     def test_forwarder_reports_protected_service_failure(self):
         request = SimpleNamespace(
             request_method="GET",
@@ -456,6 +512,145 @@ class QueueIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(failed.id, queued.id)
         self.assertEqual(failed.status, "FAILED")
+        self.assertEqual(failed.attempt_count, 1)
+        self.assertEqual(failed.failure_category, "HTTP_STATUS_ERROR")
+        self.assertEqual(failed.upstream_status_code, 503)
+        self.assertIsNotNone(failed.failure_at)
+
+    def test_failed_transport_persists_sanitized_diagnostic(self):
+        queued = add_to_queue(self.db, "active-key-id", "/result?prn=private-value")
+        with patch.dict(os.environ, {"QUEUE_WORKER_MAX_ATTEMPTS": "1"}):
+            failed = self.run_worker(
+                "ALLOW",
+                ProtectedServiceConfig("http://127.0.0.1:1"),
+            )
+        self.assertEqual(failed.id, queued.id)
+        self.assertEqual(failed.status, "FAILED")
+        self.assertEqual(failed.failure_category, "TRANSPORT_ERROR")
+        self.assertEqual(failed.failure_message, "Could not connect to the protected service.")
+        self.assertEqual(failed.upstream_status_code, None)
+        self.assertNotIn("private-value", failed.failure_message)
+        self.assertEqual(failed.attempt_count, 1)
+
+    def test_invalid_target_and_configuration_are_persisted_as_distinct_categories(self):
+        invalid_target = add_to_queue(self.db, "active-key-id", "/%252e%252e/private")
+        with patch.dict(os.environ, {"QUEUE_WORKER_MAX_ATTEMPTS": "1"}):
+            target_failure = self.run_worker("ALLOW", ProtectedServiceConfig(self.protected_url))
+        self.assertEqual(target_failure.id, invalid_target.id)
+        self.assertEqual(target_failure.status, "FAILED")
+        self.assertEqual(target_failure.failure_category, "INVALID_TARGET")
+        self.assertIsNone(target_failure.upstream_status_code)
+
+        missing_config = add_to_queue(self.db, "active-key-id", "/api/health")
+        with patch.dict(os.environ, {"QUEUE_WORKER_MAX_ATTEMPTS": "1"}):
+            config_failure = self.run_worker("ALLOW", ProtectedServiceConfig(""))
+        self.assertEqual(config_failure.id, missing_config.id)
+        self.assertEqual(config_failure.failure_category, "SERVICE_NOT_CONFIGURED")
+        self.assertIsNotNone(config_failure.failure_at)
+
+    def test_unexpected_forwarding_exception_is_persisted_without_exception_text(self):
+        queued = add_to_queue(self.db, "active-key-id", "/api/health")
+        with patch(
+            "backend.queue_worker.forward_request",
+            side_effect=RuntimeError("sensitive upstream detail"),
+        ):
+            failed = self.run_worker("ALLOW")
+        self.assertEqual(failed.id, queued.id)
+        self.assertEqual(failed.status, "FAILED")
+        self.assertEqual(failed.failure_category, "INTERNAL_ERROR")
+        self.assertNotIn("sensitive upstream detail", failed.failure_message)
+
+    def test_transport_failure_retries_then_completes_once(self):
+        queued = add_to_queue(self.db, "active-key-id", "/result?prn=retry")
+        results = iter((
+            ForwardResult(False, error="TRANSPORT_ERROR"),
+            ForwardResult(True, status_code=200),
+        ))
+        with (
+            patch.dict(
+                os.environ,
+                {"QUEUE_WORKER_MAX_ATTEMPTS": "3", "QUEUE_WORKER_RETRY_BACKOFF_SECONDS": "0"},
+                clear=True,
+            ),
+            patch("backend.queue_worker.forward_request", side_effect=lambda *_: next(results)) as forward,
+        ):
+            completed = self.run_worker("ALLOW")
+        self.assertEqual(completed.id, queued.id)
+        self.assertEqual(completed.status, "COMPLETED")
+        self.assertEqual(completed.attempt_count, 2)
+        self.assertEqual(completed.failure_category, "TRANSPORT_ERROR")
+        self.assertEqual(forward.call_count, 2)
+
+    def test_timeout_is_transient_and_can_recover(self):
+        queued = add_to_queue(self.db, "active-key-id", "/result?prn=timeout-retry")
+        results = iter((
+            ForwardResult(False, error="TIMEOUT"),
+            ForwardResult(True, status_code=200),
+        ))
+        with (
+            patch.dict(
+                os.environ,
+                {"QUEUE_WORKER_MAX_ATTEMPTS": "2", "QUEUE_WORKER_RETRY_BACKOFF_SECONDS": "0"},
+                clear=True,
+            ),
+            patch("backend.queue_worker.forward_request", side_effect=lambda *_: next(results)),
+        ):
+            completed = self.run_worker("ALLOW")
+        self.assertEqual(completed.id, queued.id)
+        self.assertEqual(completed.status, "COMPLETED")
+        self.assertEqual(completed.attempt_count, 2)
+        self.assertEqual(completed.failure_category, "TIMEOUT")
+
+    def test_repeated_transport_failures_stop_at_bounded_attempt_count(self):
+        queued = add_to_queue(self.db, "active-key-id", "/result?prn=retry-limit")
+        with (
+            patch.dict(
+                os.environ,
+                {"QUEUE_WORKER_MAX_ATTEMPTS": "3", "QUEUE_WORKER_RETRY_BACKOFF_SECONDS": "0"},
+                clear=True,
+            ),
+            patch(
+                "backend.queue_worker.forward_request",
+                return_value=ForwardResult(False, error="TRANSPORT_ERROR"),
+            ) as forward,
+        ):
+            failed = self.run_worker("ALLOW")
+        self.assertEqual(failed.id, queued.id)
+        self.assertEqual(failed.status, "FAILED")
+        self.assertEqual(failed.attempt_count, 3)
+        self.assertEqual(forward.call_count, 3)
+
+    def test_interrupted_processing_is_recovered_after_worker_restart(self):
+        queued = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=recovered",
+        )
+        queued.status = "PROCESSING"
+        queued.attempt_count = 1
+        from datetime import datetime, timedelta
+        queued.updated_at = datetime.utcnow() - timedelta(seconds=400)
+        self.db.commit()
+
+        with patch.dict(os.environ, {"QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS": "61"}):
+            completed = self.run_worker("ALLOW")
+        self.assertEqual(completed.id, queued.id)
+        self.assertEqual(completed.status, "COMPLETED")
+        self.assertEqual(completed.attempt_count, 2)
+
+    def test_stale_processing_at_attempt_limit_becomes_visible_failure(self):
+        queued = add_to_queue(self.db, "active-key-id", "/result?prn=interrupted")
+        queued.status = "PROCESSING"
+        queued.attempt_count = 3
+        from datetime import datetime, timedelta
+        queued.updated_at = datetime.utcnow() - timedelta(seconds=400)
+        self.db.commit()
+        with patch.dict(os.environ, {"QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS": "61"}):
+            self.assertIsNone(self.run_worker("ALLOW"))
+        self.db.refresh(queued)
+        self.assertEqual(queued.status, "FAILED")
+        self.assertEqual(queued.failure_category, "WORKER_INTERRUPTED")
+        self.assertEqual(queued.attempt_count, 3)
 
     def test_concurrent_workers_claim_a_request_at_most_once(self):
         waiting = add_to_queue(
@@ -566,6 +761,46 @@ class QueueIntegrationTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(exercise()), "COMPLETED")
         self.assertEqual(forwarded_ids, [waiting.id])
+
+    def test_waiting_request_survives_worker_stop_and_restart(self):
+        waiting = add_to_queue(
+            self.db,
+            "active-key-id",
+            f"{self.protected_url}/result?prn=restart",
+        )
+
+        async def exercise():
+            stopped = QueueWorker(self.sessions, poll_interval_seconds=0.01)
+            with patch(
+                "backend.queue_worker.get_current_admission",
+                new=AsyncMock(return_value={"decision": "QUEUE", "reason": "TEST"}),
+            ):
+                stopped.start()
+                await asyncio.sleep(0.04)
+                await stopped.stop()
+            with self.sessions() as session:
+                self.assertEqual(session.get(Request, waiting.id).status, "WAITING")
+
+            restarted = QueueWorker(
+                self.sessions,
+                poll_interval_seconds=0.01,
+                forwarding_config=ProtectedServiceConfig(self.protected_url),
+            )
+            with patch(
+                "backend.queue_worker.get_current_admission",
+                new=AsyncMock(return_value={"decision": "ALLOW", "reason": "TEST"}),
+            ):
+                restarted.start()
+                for _ in range(200):
+                    with self.sessions() as session:
+                        status = session.get(Request, waiting.id).status
+                    if status in {"COMPLETED", "FAILED"}:
+                        break
+                    await asyncio.sleep(0.01)
+                await restarted.stop()
+            return status
+
+        self.assertEqual(asyncio.run(exercise()), "COMPLETED")
 
     def test_automatic_worker_marks_forwarding_failure_failed(self):
         waiting = add_to_queue(

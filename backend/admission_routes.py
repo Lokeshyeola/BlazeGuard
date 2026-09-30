@@ -119,4 +119,9 @@ def request_status(
         "request_id": str(request.id),
         "status": request.status,
         "queue_position": request.queue_position,
+        "attempt_count": request.attempt_count,
+        "failure_category": request.failure_category,
+        "failure_message": request.failure_message,
+        "failure_at": request.failure_at.isoformat() + "Z" if request.failure_at else None,
+        "upstream_status_code": request.upstream_status_code,
     }

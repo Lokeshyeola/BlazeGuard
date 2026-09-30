@@ -7,6 +7,21 @@ from urllib.parse import parse_qs, urlsplit
 class ProtectedResultHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlsplit(self.path)
+        self.server.seen_paths.append(self.path)
+        if parsed.path == "/api/health":
+            self._json(200, {"status": "ok"})
+            return
+        if parsed.path.startswith("/api/result/"):
+            self._json(
+                200,
+                {
+                    "exam": "bsc-cs-sem4-apr-2025",
+                    "seat_number": "DEMO24017",
+                    "student_name": "Aarav Kulkarni",
+                    "result": "PASS",
+                },
+            )
+            return
         if parsed.path != "/result":
             self.send_error(404)
             return
@@ -21,10 +36,11 @@ class ProtectedResultHandler(BaseHTTPRequestHandler):
             self.send_error(400, "PRN is required")
             return
 
-        response = json.dumps(
-            {"prn": prn, "student": "Demo Student", "result": "PASS"}
-        ).encode("utf-8")
-        self.send_response(200)
+        self._json(200, {"prn": prn, "student": "Demo Student", "result": "PASS"})
+
+    def _json(self, status, data):
+        response = json.dumps(data).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
@@ -39,6 +55,10 @@ class ProtectedResultHandler(BaseHTTPRequestHandler):
 
 class ProtectedResultServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen_paths = []
 
     def handle_error(self, _request, _client_address):
         pass

@@ -60,7 +60,7 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         secret, key_id = result["api_key"], result["key_id"]
         self.assertTrue(secret.startswith("BG_" + key_id + "_"))
         listed = requests.get(self.base + "/api/v1/api-keys", headers=admin, timeout=3)
-        self.assertNotIn(secret, listed.text)
+        self.assertFalse(secret in listed.text)
         self.assertNotIn("key_hash", listed.text)
         db = sqlite3.connect(self.work / "blazeguard.db")
         try:
@@ -78,7 +78,41 @@ class ApiKeyLifecycleTests(unittest.TestCase):
         self.assertEqual(revoked.json()["status"], "revoked")
         self.assertEqual(requests.get(self.base + "/api/v1/connection", headers=valid, timeout=3).status_code, 401)
         self.log.flush()
-        self.assertNotIn(secret, self.log_path.read_text(encoding="utf-8"))
+        log_contents = self.log_path.read_text(encoding="utf-8")
+        self.assertFalse(secret in log_contents)
+        self.assertFalse(self.token in log_contents)
+
+    def test_multiple_api_keys_have_independent_revocation_and_metadata(self):
+        admin = {"Authorization": "Bearer " + self.token}
+        created = [
+            requests.post(self.base + "/api/v1/api-keys", headers=admin, timeout=3).json()
+            for _ in range(2)
+        ]
+        first, second = created
+        first_auth = {"Authorization": "Bearer " + first["api_key"]}
+        second_auth = {"Authorization": "Bearer " + second["api_key"]}
+        self.assertEqual(requests.get(self.base + "/api/v1/connection", headers=first_auth, timeout=3).status_code, 200)
+        self.assertEqual(requests.get(self.base + "/api/v1/connection", headers=second_auth, timeout=3).status_code, 200)
+
+        listing = requests.get(self.base + "/api/v1/api-keys", headers=admin, timeout=3).json()["keys"]
+        indexed = {item["key_id"]: item for item in listing}
+        for item in created:
+            metadata = indexed[item["key_id"]]
+            self.assertEqual(metadata["status"], "active")
+            self.assertIsNotNone(metadata["created_at"])
+            self.assertIsNone(metadata["revoked_at"])
+            self.assertFalse(item["api_key"] in str(metadata))
+
+        revoked = requests.delete(
+            self.base + "/api/v1/api-keys/" + first["key_id"],
+            headers=admin,
+            timeout=3,
+        )
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(revoked.json()["status"], "revoked")
+        self.assertIsNotNone(revoked.json()["revoked_at"])
+        self.assertEqual(requests.get(self.base + "/api/v1/connection", headers=first_auth, timeout=3).status_code, 401)
+        self.assertEqual(requests.get(self.base + "/api/v1/connection", headers=second_auth, timeout=3).status_code, 200)
 
     def test_admission_route_requires_active_api_key(self):
         admin = {"Authorization": "Bearer " + self.token}
@@ -150,6 +184,9 @@ class ApiKeyLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(status_response.status_code, 200)
             self.assertEqual(status_response.json()["status"], "WAITING")
+            self.assertEqual(status_response.json()["attempt_count"], 0)
+            self.assertIsNone(status_response.json()["failure_category"])
+            self.assertIsNone(status_response.json()["upstream_status_code"])
         else:
             self.assertEqual(after, before)
 

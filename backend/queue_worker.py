@@ -9,7 +9,12 @@ from backend.admission_service import get_current_admission
 from backend.request_forwarder import ProtectedServiceConfig, forward_request
 from database.models import Request
 from database.database import SessionLocal
-from database.request_repository import update_status
+from database.request_repository import (
+    begin_request_attempt,
+    recover_abandoned_requests,
+    record_request_failure,
+    update_status,
+)
 from queue_management.queue_manager import process_next_request
 
 logger = logging.getLogger(__name__)
@@ -23,6 +28,34 @@ def get_poll_interval_seconds() -> float:
     return interval if 0.1 <= interval <= 60 else 2.0
 
 
+def _bounded_integer_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def get_max_attempts() -> int:
+    return _bounded_integer_env("QUEUE_WORKER_MAX_ATTEMPTS", 3, 1, 10)
+
+
+def get_processing_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS", "300"))
+    except ValueError:
+        return 300.0
+    return value if 61 <= value <= 3600 else 300.0
+
+
+def get_retry_backoff_seconds() -> float:
+    try:
+        value = float(os.getenv("QUEUE_WORKER_RETRY_BACKOFF_SECONDS", "0.25"))
+    except ValueError:
+        return 0.25
+    return value if 0 <= value <= 30 else 0.25
+
+
 async def process_next_request_if_allowed(
     db: Session,
     forwarding_config: ProtectedServiceConfig | None = None,
@@ -32,16 +65,63 @@ async def process_next_request_if_allowed(
     if admission["decision"] != "ALLOW":
         return None
 
+    recover_abandoned_requests(
+        db,
+        stale_after_seconds=get_processing_timeout_seconds(),
+        max_attempts=get_max_attempts(),
+    )
     request = process_next_request(db)
     if request is None:
         return None
 
-    try:
-        result = await asyncio.to_thread(forward_request, request, forwarding_config)
-        final_status = "COMPLETED" if result.succeeded else "FAILED"
-    except Exception:
-        final_status = "FAILED"
-    return update_status(db, request.id, final_status)
+    max_attempts = get_max_attempts()
+    backoff_seconds = get_retry_backoff_seconds()
+    while True:
+        request = begin_request_attempt(db, request.id)
+        if request is None:
+            return None
+        try:
+            result = await asyncio.to_thread(forward_request, request, forwarding_config)
+            category = result.error or "INTERNAL_ERROR"
+        except Exception as exc:
+            # Do not log exception text: transport/config exceptions may contain URLs.
+            logger.error(
+                "Unexpected queue forwarding failure",
+                extra={"request_id": request.id, "failure_category": "INTERNAL_ERROR", "exception_type": type(exc).__name__},
+            )
+            result = None
+            category = "INTERNAL_ERROR"
+
+        if result is not None and result.succeeded:
+            return update_status(db, request.id, "COMPLETED")
+
+        record_request_failure(
+            db,
+            request.id,
+            category,
+            _failure_message(category),
+            result.status_code if result is not None else None,
+        )
+        if category in {"TRANSPORT_ERROR", "TIMEOUT"} and request.attempt_count < max_attempts:
+            delay = min(backoff_seconds * (2 ** (request.attempt_count - 1)), 30.0)
+            if delay:
+                await asyncio.sleep(delay)
+            continue
+        return update_status(db, request.id, "FAILED")
+
+
+def _failure_message(category: str) -> str:
+    """Fixed, non-sensitive descriptions for persisted request diagnostics."""
+    return {
+        "TRANSPORT_ERROR": "Could not connect to the protected service.",
+        "TIMEOUT": "The protected service did not respond before the timeout.",
+        "HTTP_STATUS_ERROR": "The protected service returned an unsuccessful HTTP status.",
+        "INVALID_TARGET": "The requested forwarding target is invalid.",
+        "INVALID_CONFIGURATION": "The protected service configuration is invalid.",
+        "SERVICE_NOT_CONFIGURED": "The protected service is not configured.",
+        "INVALID_METHOD": "The requested HTTP method is invalid.",
+        "INTERNAL_ERROR": "An unexpected internal error occurred while forwarding.",
+    }.get(category, "The request could not be forwarded.")
 
 
 class QueueWorker:
@@ -95,8 +175,14 @@ class QueueWorker:
         while not self._stop_event.is_set():
             try:
                 await self._run_once()
-            except Exception:
-                logger.exception("Queue worker cycle failed")
+            except Exception as exc:
+                logger.error(
+                    "Queue worker cycle failed",
+                    extra={
+                        "failure_category": "INTERNAL_ERROR",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
 
             try:
                 await asyncio.wait_for(

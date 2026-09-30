@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -74,6 +76,86 @@ def claim_next_waiting_request(db: Session) -> Request | None:
         db.commit()
         db.refresh(request)
         return request
+    except Exception:
+        db.rollback()
+        raise
+
+
+def begin_request_attempt(db: Session, request_id: int) -> Request | None:
+    """Persist an attempt start only while this caller owns a PROCESSING row."""
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        request = db.query(Request).filter(Request.id == request_id).first()
+        if request is None or request.status != "PROCESSING":
+            db.rollback()
+            return None
+        request.attempt_count += 1
+        db.commit()
+        db.refresh(request)
+        return request
+    except Exception:
+        db.rollback()
+        raise
+
+
+def record_request_failure(
+    db: Session,
+    request_id: int,
+    category: str,
+    message: str,
+    upstream_status_code: int | None = None,
+) -> Request | None:
+    """Persist sanitized diagnostics; never persist exception text or headers."""
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        request = db.query(Request).filter(Request.id == request_id).first()
+        if request is None or request.status != "PROCESSING":
+            db.rollback()
+            return None
+        request.failure_category = category[:32]
+        request.failure_message = message[:300]
+        request.failure_at = datetime.utcnow()
+        request.upstream_status_code = upstream_status_code
+        db.commit()
+        db.refresh(request)
+        return request
+    except Exception:
+        db.rollback()
+        raise
+
+
+def recover_abandoned_requests(
+    db: Session,
+    stale_after_seconds: float = 300,
+    max_attempts: int = 3,
+) -> tuple[int, int]:
+    """Requeue stale claims or finalize ones whose bounded attempts are spent."""
+    cutoff = datetime.utcnow() - timedelta(seconds=max(0, stale_after_seconds))
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        stale = list(
+            db.scalars(
+                select(Request).where(
+                    Request.status == "PROCESSING",
+                    Request.updated_at <= cutoff,
+                ).order_by(Request.queue_position.asc(), Request.id.asc())
+            ).all()
+        )
+        returned = 0
+        failed = 0
+        for request in stale:
+            if request.attempt_count >= max_attempts:
+                request.status = "FAILED"
+                request.failure_category = "WORKER_INTERRUPTED"
+                request.failure_message = "Worker stopped before the request completed."
+                request.failure_at = datetime.utcnow()
+                request.upstream_status_code = None
+                failed += 1
+            else:
+                request.status = "WAITING"
+                returned += 1
+        db.commit()
+        return returned, failed
     except Exception:
         db.rollback()
         raise

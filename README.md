@@ -37,7 +37,47 @@ For local demonstrations only, `BLAZEGUARD_DEMO_ADMISSION_MODE` can force the sh
 
 POST /api/v1/requests accepts JSON containing `requested_url` and the same bearer API key. ALLOW and REJECT responses include the decision and reason without creating a queue record. QUEUE creates a persistent WAITING request and returns `request_id`, `queue_position`, and status. An optional `Idempotency-Key` header makes queued retries return the original request; reusing that key for a different URL returns 409. GET /api/v1/requests/{request_id} returns the status and queue position to the API key that created the request.
 
-The FastAPI lifespan starts one managed background queue worker by default. It polls using `QUEUE_WORKER_POLL_INTERVAL_SECONDS` (default 2 seconds), checks the current server-side admission policy, and atomically claims the next FIFO WAITING request only when the result is ALLOW. It forwards the stored method/path/query to the host configured by `PROTECTED_RESULT_SERVICE_URL` and marks the request COMPLETED for a successful response or FAILED for an error/timeout. QUEUE, REJECT, and an empty queue produce no claim. Shutdown signals the worker and waits for its in-flight cycle to finish. Set `QUEUE_WORKER_ENABLED=false` to disable it (for example, when running API-only tests). Run one application process with the worker enabled; each separate application process would otherwise start its own worker loop. The forwarding timeout is controlled by `PROTECTED_RESULT_TIMEOUT_SECONDS` (default 5 seconds). The integration tests use a local fake protected result server; BlazeGuard does not implement result lookup or calculation and is not connected to a real SPPU/government server.
+The FastAPI lifespan starts one managed background queue worker by default. It polls using `QUEUE_WORKER_POLL_INTERVAL_SECONDS` (default 2 seconds), checks the current server-side admission policy, and atomically claims the next FIFO WAITING request only when the result is ALLOW. QUEUE and REJECT leave requests waiting and do not claim them. The worker forwards the stored method/path/query to the host configured by `PROTECTED_RESULT_SERVICE_URL`.
+
+Queued requests follow `WAITING -> PROCESSING -> COMPLETED` or `WAITING -> PROCESSING -> FAILED`. Transient transport failures and timeouts retry up to `QUEUE_WORKER_MAX_ATTEMPTS` (default 3); upstream HTTP errors, invalid targets/configuration, and unexpected internal errors fail immediately. Retry delay starts at `QUEUE_WORKER_RETRY_BACKOFF_SECONDS` (default 0.25 seconds) and doubles, capped at 30 seconds. The worker returns an abandoned PROCESSING row to FIFO after it is older than `QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS` (default 300 seconds), unless its attempt limit is exhausted; then it marks the row FAILED / WORKER_INTERRUPTED. Failure category, safe diagnostic text, failure time, attempt count, and any received upstream HTTP status are available from the request record and authenticated request-status endpoint. Immediate ALLOW forwarding retains its synchronous response behavior and reports failure in its response; it does not create a queue record.
+
+Set `QUEUE_WORKER_ENABLED=false` to disable the worker (for example, when running API-only tests). Run one application process with the worker enabled; each application process starts its own worker loop. The forwarding timeout is controlled by `PROTECTED_RESULT_TIMEOUT_SECONDS` (default 5 seconds). On interruption after a remote server has received a request but before BlazeGuard records its response, recovery can retry it; the remote service should make GET operations safe to repeat. The integration tests use local fake protected-service fixtures; BlazeGuard does not implement result lookup or calculation and is not connected to an external result service.
+
+Important environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BLAZEGUARD_ADMIN_TOKEN` | unset | Private bearer token for API-key management; administration fails closed while unset. |
+| `PROTECTED_RESULT_SERVICE_URL` | unset | Configurable upstream base URL; `.env.example` contains only an invalid placeholder host. |
+| `PROTECTED_RESULT_TIMEOUT_SECONDS` | `5` | Per-attempt upstream timeout (valid range: greater than 0 through 60). |
+| `QUEUE_WORKER_ENABLED` | `true` | Starts/stops the background worker. |
+| `QUEUE_WORKER_POLL_INTERVAL_SECONDS` | `2` | Poll interval (valid range: 0.1–60; other values use the default). |
+| `QUEUE_WORKER_MAX_ATTEMPTS` | `3` | Total bounded attempts (valid range: 1–10). |
+| `QUEUE_WORKER_RETRY_BACKOFF_SECONDS` | `0.25` | Initial exponential retry delay (valid range: 0–30). |
+| `QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS` | `300` | Age before an abandoned processing claim is recovered (valid range: 61–3600). |
+| `BLAZEGUARD_DEMO_ADMISSION_MODE` | unset | Local demo/test-only ALLOW/QUEUE/REJECT override. Never enable for production. |
+
+The test suite runs against isolated temporary SQLite databases and local fixture servers; it does not require either service to be running:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s testing -v
+```
+
+For the local two-service demo, start the separate fictional Result Portal from its own `backend` directory in Terminal 1:
+
+```powershell
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+```
+
+Then in Terminal 2, from the BlazeGuard repository root, set the private admin token and the temporary upstream URL in that server process and start BlazeGuard:
+
+```powershell
+$env:BLAZEGUARD_ADMIN_TOKEN = "<set a private random value>"
+$env:PROTECTED_RESULT_SERVICE_URL = "http://127.0.0.1:8001"
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Use a generated BlazeGuard API key with `Authorization: Bearer <API_KEY>` for `/api/v1` client routes; never put it in source, a URL, or logs. Keep `BLAZEGUARD_DEMO_ADMISSION_MODE` unset outside controlled demos. Tests 1–6 are reproduced by `testing/test_original_six_scenarios.py` using in-process local fixtures: successful forwarding to the fictional result path, queue admission, worker completion, reject without enqueue/forward, unavailable upstream transport handling, and configurable target verification. The tests do not use the separately running demo services.
 
 ## API key lifecycle
 

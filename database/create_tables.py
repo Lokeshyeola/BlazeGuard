@@ -28,6 +28,18 @@ def create_tables(target_engine=engine):
                     "ALTER TABLE requests ADD COLUMN request_method "
                     "VARCHAR(10) NOT NULL DEFAULT 'GET'"
                 )
+            additions = {
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "failure_category": "VARCHAR(32)",
+                "failure_message": "VARCHAR(300)",
+                "failure_at": "DATETIME",
+                "upstream_status_code": "INTEGER",
+            }
+            for column, declaration in additions.items():
+                if column not in columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE requests ADD COLUMN {column} {declaration}"
+                    )
             index_exists = connection.exec_driver_sql(
                 "SELECT 1 FROM sqlite_master WHERE type='index' "
                 "AND name='uq_requests_waiting_queue_position'"
