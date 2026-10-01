@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -18,6 +18,14 @@ class Request(Base):
         default="GET",
         server_default="GET",
     )
+    # DEMO-ONLY marker. NULL session IDs and false markers are ordinary Phase 1 rows.
+    is_demo: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
+    demo_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     queue_position: Mapped[int] = mapped_column(Integer, nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -45,6 +53,16 @@ class Request(Base):
         onupdate=datetime.utcnow,
         nullable=False
     )
+
+
+class OperatorDemoControl(Base):
+    """DEMO-ONLY singleton claim; contains no request history or real-traffic state."""
+
+    __tablename__ = "operator_demo_control"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    active_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    active_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 WAITING_QUEUE_POSITION_INDEX = Index(

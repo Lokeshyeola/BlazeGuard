@@ -140,6 +140,7 @@ class QueueIntegrationTests(unittest.TestCase):
                 "request_id": response["request_id"],
                 "status": "WAITING",
                 "queue_position": 1,
+                "current_queue_position": 1,
                 "attempt_count": 0,
                 "failure_category": None,
                 "failure_message": None,

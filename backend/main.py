@@ -8,9 +8,11 @@ from pydantic import BaseModel
 
 from backend.admission_routes import router as admission_router
 from backend.api_key_routes import router as api_key_router
+from backend.demo_simulator import DemoSimulator, cleanup_stale_demo_rows
 from backend.decision_engine.decision_engine import make_decision
 from backend.monitoring.cpu_monitor import cpu_monitor
 from backend.monitoring.ram_monitor import ram_monitor
+from backend.operator_routes import router as operator_router
 from backend.queue_worker import QueueWorker
 from database.create_tables import create_tables
 
@@ -18,10 +20,14 @@ from database.create_tables import create_tables
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     create_tables()
+    # DEMO-ONLY startup guard: cancel abandoned marked demo work before the worker starts.
+    cleanup_stale_demo_rows()
+    demo_simulator = DemoSimulator()
+    application.state.demo_simulator = demo_simulator
     enabled = os.getenv("QUEUE_WORKER_ENABLED", "true").strip().lower() in {
         "1", "true", "yes", "on"
     }
-    worker = QueueWorker() if enabled else None
+    worker = QueueWorker(demo_simulator=demo_simulator) if enabled else None
     application.state.queue_worker = worker
     if worker is not None:
         worker.start()
@@ -41,6 +47,8 @@ app.add_middleware(
         "http://localhost:5500",
         "http://127.0.0.1:3000",
         "http://localhost:3000",
+        "http://127.0.0.1:8765",
+        "http://localhost:8765",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
@@ -48,6 +56,7 @@ app.add_middleware(
 )
 app.include_router(api_key_router)
 app.include_router(admission_router)
+app.include_router(operator_router)
 
 
 class ServerMetrics(BaseModel):

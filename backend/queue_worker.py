@@ -76,6 +76,22 @@ async def process_next_request_if_allowed(
 
     max_attempts = get_max_attempts()
     backoff_seconds = get_retry_backoff_seconds()
+
+    # DEMO-ONLY safety boundary: a persisted marker selects local completion before
+    # any forwarding call. The request URL is deliberately not used for this decision.
+    if request.is_demo is True:
+        request = begin_request_attempt(db, request.id)
+        if request is None:
+            return None
+        try:
+            return update_status(db, request.id, "COMPLETED")
+        except ValueError:
+            # RESET may cancel a claimed demo row while this local branch is completing.
+            current = db.get(Request, request.id)
+            if current is not None and current.status == "CANCELLED":
+                return current
+            raise
+
     while True:
         request = begin_request_attempt(db, request.id)
         if request is None:
@@ -130,6 +146,7 @@ class QueueWorker:
         session_factory: Callable[[], Session] = SessionLocal,
         poll_interval_seconds: float | None = None,
         forwarding_config: ProtectedServiceConfig | None = None,
+        demo_simulator=None,
     ):
         self.session_factory = session_factory
         self.poll_interval_seconds = (
@@ -138,6 +155,7 @@ class QueueWorker:
             else get_poll_interval_seconds()
         )
         self.forwarding_config = forwarding_config
+        self.demo_simulator = demo_simulator
         if self.poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
         self._stop_event: asyncio.Event | None = None
@@ -173,6 +191,7 @@ class QueueWorker:
         if self._stop_event is None:
             return
         while not self._stop_event.is_set():
+            cycle_started = asyncio.get_running_loop().time()
             try:
                 await self._run_once()
             except Exception as exc:
@@ -184,10 +203,21 @@ class QueueWorker:
                     },
                 )
 
+            delay = self.poll_interval_seconds
+            if self.demo_simulator is not None:
+                try:
+                    target_rate = self.demo_simulator.worker_service_rate()
+                except Exception:
+                    target_rate = None
+                    logger.exception("Could not read DEMO-ONLY worker service rate")
+                if target_rate and target_rate > 0:
+                    elapsed = asyncio.get_running_loop().time() - cycle_started
+                    delay = max(0.0, (1.0 / target_rate) - elapsed)
+
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=self.poll_interval_seconds,
+                    timeout=delay,
                 )
             except asyncio.TimeoutError:
                 pass

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a1019">
+  <title>BlazeGuard | Operator Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="BlazeGuard home">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-name">BLAZE<span>GUARD</span></span>
+      </a>
+      <div class="header-title"><span class="eyebrow">CONTROL PLANE</span><h1>Operator Dashboard</h1></div>
+      <div class="simulation-badge"><span class="pulse-dot"></span> SIMULATION MODE</div>
+    </header>
+
+    <main id="top">
+      <section class="intro-row" aria-label="Dashboard status">
+        <div><p class="eyebrow">TRAFFIC OVERVIEW <span class="live-dot"></span> LOCAL SIMULATION</p><h2>Service traffic at a glance</h2><p class="subhead">Observe how demand, capacity, and queue pressure move together.</p></div>
+        <div class="run-state"><span class="state-indicator" id="state-indicator"></span><span id="run-state">STANDBY</span><span class="divider">/</span><span class="mono" id="elapsed">00:00</span></div>
+      </section>
+
+      <section class="metric-grid" aria-label="Traffic metrics">
+        <article class="metric-card accent-blue"><div class="metric-heading"><span>Incoming</span><span class="metric-icon">↘</span></div><strong id="metric-incoming">0</strong><div class="metric-foot"><span class="foot-dot blue"></span><span>virtual requests received</span><span class="metric-rate" id="incoming-rate">0 / sec</span></div></article>
+        <article class="metric-card accent-green"><div class="metric-heading"><span>Allowed</span><span class="metric-icon">✓</span></div><strong id="metric-allowed">0</strong><div class="metric-foot"><span class="foot-dot green"></span><span>admitted to service</span></div></article>
+        <article class="metric-card accent-amber"><div class="metric-heading"><span>Waiting</span><span class="metric-icon">◷</span></div><strong id="metric-waiting">0</strong><div class="metric-foot"><span class="foot-dot amber"></span><span>in virtual queue</span><span class="wait-pill" id="wait-pill">0 sec wait</span></div></article>
+        <article class="metric-card accent-cyan"><div class="metric-heading"><span>Completed</span><span class="metric-icon">✓</span></div><strong id="metric-completed">0</strong><div class="metric-foot"><span class="foot-dot cyan"></span><span>processed successfully</span></div></article>
+        <article class="metric-card accent-red"><div class="metric-heading"><span>Rejected</span><span class="metric-icon">×</span></div><strong id="metric-rejected">0</strong><div class="metric-foot"><span class="foot-dot red"></span><span>queue limit reached</span></div></article>
+      </section>
+
+      <div class="main-grid">
+        <section class="panel traffic-panel">
+          <div class="panel-heading"><div><p class="eyebrow">SCENARIO CONFIGURATION</p><h2>Shape your traffic</h2></div><span class="config-tag">LOCAL ONLY</span></div>
+          <div class="slider-control">
+            <div class="slider-label"><label for="capacity-slider">Portal Capacity</label><span class="slider-value"><strong id="capacity-value">42</strong><small>req / sec</small></span></div>
+            <input id="capacity-slider" type="range" min="1" max="100" value="42" aria-describedby="capacity-help">
+            <div class="range-ends"><span>1 req/sec</span><span>100 req/sec</span></div><p class="control-help" id="capacity-help">Maximum virtual requests processed each second.</p>
+          </div>
+          <div class="slider-control traffic-control">
+            <div class="slider-label"><label for="traffic-slider">Incoming Traffic</label><span class="slider-value"><strong id="traffic-value">30</strong><small>req / sec</small></span></div>
+            <input id="traffic-slider" type="range" min="1" max="500" value="30" aria-describedby="traffic-help">
+            <div class="range-ends"><span>1 req/sec</span><span>500 req/sec</span></div><p class="control-help" id="traffic-help">Virtual demand entering the system every second.</p>
+          </div>
+          <div class="control-row"><button class="button button-start" id="start-button" type="button"><span>▶</span> START TRAFFIC</button><button class="button button-stop" id="stop-button" type="button" disabled><span>Ⅱ</span> STOP TRAFFIC</button><button class="button button-reset" id="reset-button" type="button">RESET</button></div>
+          <div class="scenario-note"><span class="note-icon">i</span><span>When demand exceeds capacity, requests wait. If the bounded queue fills, new arrivals are rejected.</span></div>
+        </section>
+
+        <section class="panel flow-panel">
+          <div class="panel-heading"><div><p class="eyebrow">REQUEST LIFECYCLE</p><h2>Queue flow</h2></div><div class="flow-legend"><span><i class="legend-dot blue"></i>Incoming</span><span><i class="legend-dot amber"></i>Waiting</span></div></div>
+          <div class="flow-track" aria-label="Virtual requests flow from incoming through queue and processing to completed, or rejection">
+            <div class="flow-stage stage-incoming"><div class="stage-title"><span>01</span><strong>Incoming</strong></div><div class="token-well" id="incoming-tokens"></div><small id="incoming-stage-count">0 received</small></div>
+            <div class="flow-connector"><span class="flow-line"></span><span class="flow-arrow">›</span></div>
+            <div class="flow-stage stage-waiting"><div class="stage-title"><span>02</span><strong>Waiting</strong></div><div class="token-well" id="waiting-tokens"></div><small id="waiting-stage-count">0 waiting</small></div>
+            <div class="flow-connector"><span class="flow-line"></span><span class="flow-arrow">›</span></div>
+            <div class="flow-stage stage-processing"><div class="stage-title"><span>03</span><strong>Processing</strong></div><div class="token-well" id="processing-tokens"></div><small id="processing-stage-count">0 in service</small></div>
+            <div class="flow-connector"><span class="flow-line"></span><span class="flow-arrow">›</span></div>
+            <div class="flow-stage stage-completed"><div class="stage-title"><span>04</span><strong>Completed</strong></div><div class="token-well" id="completed-tokens"></div><small id="completed-stage-count">0 completed</small></div>
+          </div>
+          <div class="rejected-lane"><span class="rejected-symbol">×</span><div><strong>Rejected</strong><small>New arrivals blocked when the simulated queue is full</small></div><span class="rejected-count" id="rejected-stage-count">0</span></div>
+          <div class="queue-summary"><div><span class="summary-label">QUEUE DEPTH</span><strong id="queue-depth">0 <small>requests</small></strong></div><div class="summary-divider"></div><div><span class="summary-label">ESTIMATED WAIT</span><strong id="estimated-wait">0 <small>sec</small></strong></div><div class="summary-capacity"><span class="summary-label">SERVICE RATE</span><strong id="service-rate">42 <small>req / sec</small></strong></div></div>
+        </section>
+      </div>
+
+      <section class="how-panel"><div class="how-icon">⌁</div><div><p class="eyebrow">HOW THE SIMULATION WORKS</p><p>This dashboard generates <strong>virtual demand locally</strong> and models queue growth and processing against your selected portal capacity. It does <strong>not send real requests</strong> to BlazeGuard or the Result Portal. Metrics shown here are for demonstration only.</p></div><span class="local-chip"><span></span> BROWSER-ONLY</span></section>
+    </main>
+    <footer><span><span class="footer-mark">◆</span> BlazeGuard <span class="footer-muted">Operator Console</span></span><span>DEMO BUILD <i>·</i> ALL TRAFFIC IS SIMULATED</span></footer>
+  </div>
+</body>
+</html>

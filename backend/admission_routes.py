@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request as HttpRequest
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -11,7 +11,7 @@ from backend.api_key_routes import get_db, require_api_key
 from backend.admission_service import get_current_admission
 from backend.request_forwarder import forward_request, get_protected_service_config
 from database.models import ApiKey, Request
-from database.request_repository import get_idempotent_request
+from database.request_repository import current_queue_rank, get_idempotent_request
 from queue_management.queue_manager import add_to_queue
 
 
@@ -21,6 +21,10 @@ router = APIRouter(prefix="/api/v1")
 class RequestIntake(BaseModel):
     requested_url: str = Field(min_length=1, max_length=500)
     method: Literal["GET"] = "GET"
+
+
+def get_http_request(request: HttpRequest) -> HttpRequest:
+    return request
 
 
 @router.get("/admission", dependencies=[Depends(require_api_key)])
@@ -41,7 +45,17 @@ async def intake_request(
         min_length=1,
         max_length=128,
     ),
+    http_request: HttpRequest = Depends(get_http_request),
 ):
+    # DEMO-ONLY telemetry is inert without a running, explicitly enabled session.
+    demo_simulator = (
+        getattr(http_request.app.state, "demo_simulator", None)
+        if hasattr(http_request, "app")
+        else None
+    )
+    if demo_simulator is not None:
+        demo_simulator.record_real_arrival()
+
     if idempotency_key is not None:
         existing = get_idempotent_request(db, api_key.id, idempotency_key)
         if existing is not None:
@@ -59,8 +73,31 @@ async def intake_request(
             }
 
     decision = admission["decision"]
+    if demo_simulator is not None:
+        demo_simulator.record_real_decision(decision)
     response = {"decision": decision, "reason": admission["reason"]}
     if decision == "ALLOW":
+        # DEMO-ONLY post-admission routing: hold eligible real requests in the same FIFO
+        # while the explicit demo session has work. The admission result remains ALLOW.
+        queued = (
+            demo_simulator.enqueue_real_if_holding(
+                db,
+                api_key.id,
+                body.requested_url,
+                body.method,
+                idempotency_key,
+            )
+            if demo_simulator is not None
+            else None
+        )
+        if queued is not None:
+            return {
+                **response,
+                "request_id": str(queued.id),
+                "queue_position": queued.queue_position,
+                "current_queue_position": current_queue_rank(db, queued.id),
+                "status": queued.status,
+            }
         forwarded = await asyncio.to_thread(
             forward_request,
             SimpleNamespace(
@@ -99,6 +136,7 @@ async def intake_request(
         **response,
         "request_id": str(request.id),
         "queue_position": request.queue_position,
+        "current_queue_position": current_queue_rank(db, request.id),
         "status": request.status,
     }
 
@@ -119,6 +157,7 @@ def request_status(
         "request_id": str(request.id),
         "status": request.status,
         "queue_position": request.queue_position,
+        "current_queue_position": current_queue_rank(db, request.id),
         "attempt_count": request.attempt_count,
         "failure_category": request.failure_category,
         "failure_message": request.failure_message,

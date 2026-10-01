@@ -12,6 +12,8 @@ def add_request(
     requested_url: str,
     idempotency_key: str | None = None,
     request_method: str = "GET",
+    is_demo: bool = False,
+    demo_session_id: str | None = None,
 ) -> Request:
     try:
         db.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -35,6 +37,8 @@ def add_request(
             queue_position=current_max + 1,
             idempotency_key=idempotency_key,
             status="WAITING",
+            is_demo=is_demo,
+            demo_session_id=demo_session_id,
         )
         db.add(request)
         db.commit()
@@ -172,6 +176,69 @@ def get_idempotent_request(
             Request.idempotency_key == idempotency_key,
         )
     )
+
+
+def current_queue_rank(db: Session, request_id: int) -> int | None:
+    """Return a live 1-based rank among WAITING/PROCESSING rows; keep queue_position immutable."""
+    request = db.get(Request, request_id)
+    if request is None or request.status not in {"WAITING", "PROCESSING"}:
+        return None
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Request)
+            .where(
+                Request.status.in_(("WAITING", "PROCESSING")),
+                Request.queue_position <= request.queue_position,
+            )
+        )
+        or 0
+    )
+
+
+def cancel_demo_session_requests(
+    db: Session,
+    demo_session_id: str,
+) -> int:
+    """Cancel only active demo rows from one session via the normal status transition helper."""
+    rows = (
+        db.query(Request)
+        .filter(
+            Request.is_demo.is_(True),
+            Request.demo_session_id == demo_session_id,
+            Request.status.in_(("WAITING", "PROCESSING")),
+        )
+        .order_by(Request.queue_position.asc(), Request.id.asc())
+        .all()
+    )
+    cancelled = 0
+    for row in rows:
+        current = db.get(Request, row.id)
+        if current is not None and current.status in {"WAITING", "PROCESSING"}:
+            update_status(db, current.id, "CANCELLED")
+            cancelled += 1
+    return cancelled
+
+
+def cancel_stale_demo_requests(db: Session) -> int:
+    """Startup safety: stale demo work is cancelled before the worker starts; real rows are untouched."""
+    stale_ids = [
+        row[0]
+        for row in db.query(Request.id)
+        .filter(
+            Request.is_demo.is_(True),
+            Request.status.in_(("WAITING", "PROCESSING")),
+        )
+        .order_by(Request.queue_position.asc(), Request.id.asc())
+        .all()
+    ]
+    cancelled = 0
+    for request_id in stale_ids:
+        current = db.get(Request, request_id)
+        if current is not None and current.status in {"WAITING", "PROCESSING"}:
+            update_status(db, current.id, "CANCELLED")
+            cancelled += 1
+    return cancelled
 
 
 def update_status(

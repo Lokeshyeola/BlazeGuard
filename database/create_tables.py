@@ -3,6 +3,7 @@ from sqlalchemy import text
 from .database import Base, engine
 from .models import (
     ApiKey,
+    OperatorDemoControl,
     REQUEST_IDEMPOTENCY_INDEX,
     Request,
     WAITING_QUEUE_POSITION_INDEX,
@@ -29,6 +30,9 @@ def create_tables(target_engine=engine):
                     "VARCHAR(10) NOT NULL DEFAULT 'GET'"
                 )
             additions = {
+                # DEMO-ONLY additive migration; all pre-existing rows remain real requests.
+                "is_demo": "BOOLEAN NOT NULL DEFAULT 0",
+                "demo_session_id": "VARCHAR(36)",
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0",
                 "failure_category": "VARCHAR(32)",
                 "failure_message": "VARCHAR(300)",

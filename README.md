@@ -37,6 +37,30 @@ For local demonstrations only, `BLAZEGUARD_DEMO_ADMISSION_MODE` can force the sh
 
 POST /api/v1/requests accepts JSON containing `requested_url` and the same bearer API key. ALLOW and REJECT responses include the decision and reason without creating a queue record. QUEUE creates a persistent WAITING request and returns `request_id`, `queue_position`, and status. An optional `Idempotency-Key` header makes queued retries return the original request; reusing that key for a different URL returns 409. GET /api/v1/requests/{request_id} returns the status and queue position to the API key that created the request.
 
+### Optional local Operator Dashboard demo
+
+The separate `operator_dashboard/` page can run a bounded local traffic demo when `BLAZEGUARD_DEMO_ENABLED=true` and a dedicated `BLAZEGUARD_OPERATOR_TOKEN` is configured. The token must be different from the API-key administrator token. The page asks for the operator token at runtime and keeps it in memory only. Serve the dashboard on `http://127.0.0.1:8765` and bind BlazeGuard to `127.0.0.1`; the operator API rejects non-loopback clients.
+
+The simulator uses the existing admission service and inserts eligible requests into the existing SQLite FIFO queue. Server limits cap each session at 60 seconds and 100 generated arrivals, outstanding demo rows at 100, retained demo rows at 500 total, arrivals at 50 per second, and the demo worker service target at 10 requests/second. The cumulative limit counts every persisted demo row, including completed and cancelled rows; reaching it prevents further sessions, so demo records cannot accumulate without bound. Real rows do not count toward either demo-row limit. Slider values remain 1–500 arrivals/sec and 1–100 service requests/sec; the operator state reports the effective clamped values. During an active/draining demo session, real ALLOW requests also join the same FIFO instead of taking the immediate forwarding path. Their admission decision is unchanged. Rows marked as demo are completed locally by the existing worker and never forwarded. STOP ends generation and releases the SQLite singleton claim; RESET cancels only pending demo rows for that session and retains completed rows. A SQLite singleton row serializes active session claims across app processes. An abandoned claim is recovered after 75 seconds (the 60-second hard session limit plus grace), and startup cleanup cancels only marked demo rows.
+
+The dashboard polls session-scoped arrival/admission counters and current queue state. Queue rows expose live rank separately from the persisted FIFO sequence. `PROCESSING` is the actual worker claim count (one for this serial worker); service rate is reported separately. Session counters are in memory and reset on server restart. Keep `BLAZEGUARD_DEMO_ADMISSION_MODE` unset/OFF: it is a legacy global override and is not part of this simulator.
+
+For a local demo, set the dedicated values before starting BlazeGuard:
+
+```powershell
+$env:BLAZEGUARD_DEMO_ENABLED = "true"
+$env:BLAZEGUARD_OPERATOR_TOKEN = "<a separate long random value>"
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal from the repository root, serve only the dashboard files:
+
+```powershell
+python -m http.server 8765 --bind 127.0.0.1 --directory operator_dashboard
+```
+
+Open `http://127.0.0.1:8765`. When the demo flag is unset/false, operator endpoints return 404 and normal Phase 1 intake/worker behavior remains in effect.
+
 The FastAPI lifespan starts one managed background queue worker by default. It polls using `QUEUE_WORKER_POLL_INTERVAL_SECONDS` (default 2 seconds), checks the current server-side admission policy, and atomically claims the next FIFO WAITING request only when the result is ALLOW. QUEUE and REJECT leave requests waiting and do not claim them. The worker forwards the stored method/path/query to the host configured by `PROTECTED_RESULT_SERVICE_URL`.
 
 Queued requests follow `WAITING -> PROCESSING -> COMPLETED` or `WAITING -> PROCESSING -> FAILED`. Transient transport failures and timeouts retry up to `QUEUE_WORKER_MAX_ATTEMPTS` (default 3); upstream HTTP errors, invalid targets/configuration, and unexpected internal errors fail immediately. Retry delay starts at `QUEUE_WORKER_RETRY_BACKOFF_SECONDS` (default 0.25 seconds) and doubles, capped at 30 seconds. The worker returns an abandoned PROCESSING row to FIFO after it is older than `QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS` (default 300 seconds), unless its attempt limit is exhausted; then it marks the row FAILED / WORKER_INTERRUPTED. Failure category, safe diagnostic text, failure time, attempt count, and any received upstream HTTP status are available from the request record and authenticated request-status endpoint. Immediate ALLOW forwarding retains its synchronous response behavior and reports failure in its response; it does not create a queue record.
@@ -56,6 +80,8 @@ Important environment variables:
 | `QUEUE_WORKER_RETRY_BACKOFF_SECONDS` | `0.25` | Initial exponential retry delay (valid range: 0–30). |
 | `QUEUE_WORKER_PROCESSING_TIMEOUT_SECONDS` | `300` | Age before an abandoned processing claim is recovered (valid range: 61–3600). |
 | `BLAZEGUARD_DEMO_ADMISSION_MODE` | unset | Local demo/test-only ALLOW/QUEUE/REJECT override. Never enable for production. |
+| `BLAZEGUARD_DEMO_ENABLED` | `false` | Enables only the removable local Operator Dashboard demo layer. |
+| `BLAZEGUARD_OPERATOR_TOKEN` | unset | Dedicated local operator API credential; must differ from the admin token. |
 
 The test suite runs against isolated temporary SQLite databases and local fixture servers; it does not require either service to be running:
 
