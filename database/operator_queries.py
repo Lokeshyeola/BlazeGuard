@@ -23,6 +23,7 @@ def operator_queue_snapshot(
     db: Session,
     *,
     session_started_at: datetime | None,
+    demo_session_id: str | None = None,
     effective_service_rate: float,
     observed_window_seconds: int = 5,
 ) -> dict:
@@ -74,6 +75,33 @@ def operator_queue_snapshot(
         or 0
     )
 
+    # Source-separated demo outcomes supplement the legacy session totals above.
+    demo_completed = 0
+    demo_failed = 0
+    if demo_session_id is not None:
+        demo_completed = int(
+            db.scalar(
+                select(func.count()).select_from(Request).where(
+                    Request.is_demo.is_(True),
+                    Request.demo_session_id == demo_session_id,
+                    Request.status == "COMPLETED",
+                    Request.updated_at >= since,
+                )
+            )
+            or 0
+        )
+        demo_failed = int(
+            db.scalar(
+                select(func.count()).select_from(Request).where(
+                    Request.is_demo.is_(True),
+                    Request.demo_session_id == demo_session_id,
+                    Request.status == "FAILED",
+                    Request.updated_at >= since,
+                )
+            )
+            or 0
+        )
+
     observed_since = datetime.utcnow() - timedelta(seconds=observed_window_seconds)
     observed_completions = int(
         db.scalar(
@@ -92,6 +120,8 @@ def operator_queue_snapshot(
         "queue_depth": waiting + processing,
         "completed": completed,
         "failed": failed,
+        "demo_completed": demo_completed,
+        "demo_failed": demo_failed,
         "effective_service_rate": effective_service_rate,
         "observed_service_rate": round(observed_rate, 2),
         "estimated_wait_seconds": estimate_wait_seconds(waiting, effective_service_rate),

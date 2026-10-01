@@ -53,6 +53,11 @@ class DemoSession:
     incoming: int = 0
     allowed: int = 0
     rejected: int = 0
+    # Source-only counters preserve legacy session totals while separating simulator rows.
+    demo_incoming: int = 0
+    demo_allowed: int = 0
+    demo_queued: int = 0
+    demo_rejected: int = 0
     running: bool = True
     holding_queue: bool = True
     stop_event: asyncio.Event | None = None
@@ -167,11 +172,14 @@ class DemoSimulator:
                 session.running = False
                 return
             session.incoming += 1
+            session.demo_incoming += 1
             if decision == "REJECT":
                 session.rejected += 1
+                session.demo_rejected += 1
                 return
             if decision == "ALLOW":
                 session.allowed += 1
+                session.demo_allowed += 1
 
             # ALLOW and QUEUE both become ordinary FIFO rows; is_demo controls only worker disposition.
             db = self.session_factory()
@@ -199,6 +207,7 @@ class DemoSimulator:
                     is_demo=True,
                     demo_session_id=session_id,
                 )
+                session.demo_queued += 1
             finally:
                 db.close()
 
@@ -227,6 +236,10 @@ class DemoSimulator:
             session.incoming = 0
             session.allowed = 0
             session.rejected = 0
+            session.demo_incoming = 0
+            session.demo_allowed = 0
+            session.demo_queued = 0
+            session.demo_rejected = 0
             session.limit_reason = None
         db = self.session_factory()
         try:
@@ -318,6 +331,10 @@ class DemoSimulator:
                     "incoming": 0,
                     "allowed": 0,
                     "rejected": 0,
+                    "demo_incoming": 0,
+                    "demo_allowed": 0,
+                    "demo_queued": 0,
+                    "demo_rejected": 0,
                     "requested_incoming_rate": 0,
                     "effective_incoming_rate": 0,
                     "requested_capacity": 0,
@@ -341,6 +358,10 @@ class DemoSimulator:
             "incoming": session.incoming,
             "allowed": session.allowed,
             "rejected": session.rejected,
+            "demo_incoming": session.demo_incoming,
+            "demo_allowed": session.demo_allowed,
+            "demo_queued": session.demo_queued,
+            "demo_rejected": session.demo_rejected,
             "requested_incoming_rate": session.requested_incoming_rate,
             "effective_incoming_rate": session.effective_incoming_rate,
             "requested_capacity": session.requested_capacity,
@@ -369,6 +390,7 @@ class DemoSimulator:
                 datetime.fromisoformat(session_state["metrics_since"].removesuffix("Z"))
                 if session_state["metrics_since"] else None
             ),
+            demo_session_id=session_state["session_id"],
             effective_service_rate=rate,
         )
         return {**session_state, **metrics}

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session
 
 from backend.admission_service import get_current_admission
+from backend.operator_telemetry import real_traffic_telemetry
 from backend.request_forwarder import ProtectedServiceConfig, forward_request
 from database.models import Request
 from database.database import SessionLocal
@@ -109,7 +110,11 @@ async def process_next_request_if_allowed(
             category = "INTERNAL_ERROR"
 
         if result is not None and result.succeeded:
-            return update_status(db, request.id, "COMPLETED")
+            completed = update_status(db, request.id, "COMPLETED")
+            if completed is not None and request.is_demo is not True:
+                # OBSERVABILITY-ONLY: queue state remains database-backed.
+                real_traffic_telemetry.record_completed()
+            return completed
 
         record_request_failure(
             db,
@@ -118,6 +123,9 @@ async def process_next_request_if_allowed(
             _failure_message(category),
             result.status_code if result is not None else None,
         )
+        if request.is_demo is not True:
+            # Count failed forwarding attempts, including a transient attempt before retry.
+            real_traffic_telemetry.record_failure()
         if category in {"TRANSPORT_ERROR", "TIMEOUT"} and request.attempt_count < max_attempts:
             delay = min(backoff_seconds * (2 ** (request.attempt_count - 1)), 30.0)
             if delay:

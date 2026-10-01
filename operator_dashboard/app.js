@@ -23,12 +23,11 @@
   // Stage 2 keeps the approved layout while replacing Stage 1's virtual-only copy.
   function setLiveQueueCopy() {
     const replacements = [
-      [".metric-card.accent-blue .metric-foot span:nth-of-type(2)", "session arrivals observed"],
+      ["#traffic-breakdown", "Real 0 · Demo 0"],
       [".metric-card.accent-amber .metric-foot span:nth-of-type(2)", "active FIFO queue"],
       [".metric-card.accent-red .metric-foot span:nth-of-type(2)", "rejected by admission"],
       ["#capacity-help", "Target service rate for the serial demo worker; admission policy remains unchanged."],
       ["#traffic-help", "Requested demo arrivals per second; BlazeGuard enforces a lower server-side limit."],
-      [".flow-track", "Requests move through the shared BlazeGuard FIFO queue. Marked demo rows complete locally; real rows retain normal forwarding."],
       [".how-panel div:nth-child(2) > p:last-child", "The simulator creates bounded, marked request records in the local BlazeGuard queue. Demo rows complete locally and are never forwarded to the protected Result Portal."],
       [".how-panel .local-chip", "LOCAL OPERATOR API"],
       ["footer > span:last-child", "DEMO ROWS COMPLETE LOCALLY  ·  NO PORTAL FORWARDING"],
@@ -71,7 +70,7 @@
   }
 
   function clearVisualState() {
-    ["metric-incoming", "metric-allowed", "metric-waiting", "metric-completed", "metric-rejected", "queue-depth", "estimated-wait", "service-rate", "incoming-stage-count", "waiting-stage-count", "processing-stage-count", "completed-stage-count", "rejected-stage-count", "incoming-rate", "wait-pill"].forEach((id) => {
+    ["metric-incoming", "metric-allowed", "metric-waiting", "metric-completed", "metric-rejected", "traffic-breakdown", "queue-depth", "estimated-wait", "service-rate", "incoming-stage-count", "waiting-stage-count", "processing-stage-count", "completed-stage-count", "rejected-stage-count", "incoming-rate", "wait-pill"].forEach((id) => {
       $(id).textContent = "—";
     });
     ["incoming-tokens", "waiting-tokens", "processing-tokens", "completed-tokens"].forEach((id) => {
@@ -118,6 +117,9 @@
   }
 
   function applyState(data) {
+    const metrics = data.combined || data;
+    const real = data.real_traffic || {};
+    const demo = data.demo_traffic || {};
     connected = true;
     running = Boolean(data.running);
     stateName = data.state || (running ? "RUNNING" : "STOPPED");
@@ -132,19 +134,20 @@
       document.querySelector(".intro-row .subhead").textContent = detail;
     }
 
-    $("metric-incoming").textContent = formatCount(data.incoming);
-    $("metric-allowed").textContent = formatCount(data.allowed);
-    $("metric-waiting").textContent = formatCount(data.waiting);
-    $("metric-completed").textContent = formatCount(data.completed);
-    $("metric-rejected").textContent = formatCount(data.rejected);
-    $("incoming-rate").textContent = `${data.effective_incoming_rate || 0} / sec effective`;
+    $("metric-incoming").textContent = formatCount(metrics.incoming);
+    $("traffic-breakdown").textContent = `Real ${formatCount(real.incoming || 0)} · Demo ${formatCount(demo.incoming || 0)}`;
+    $("metric-allowed").textContent = formatCount(metrics.allowed);
+    $("metric-waiting").textContent = formatCount(metrics.waiting);
+    $("metric-completed").textContent = formatCount(metrics.completed);
+    $("metric-rejected").textContent = formatCount(metrics.rejected);
+    $("incoming-rate").textContent = `Demo ${data.effective_incoming_rate || 0} / sec effective`;
     $("wait-pill").textContent = `${formatSeconds(data.estimated_wait_seconds)} sec wait`;
-    $("incoming-stage-count").textContent = `${formatCount(data.incoming)} received`;
-    $("waiting-stage-count").textContent = `${formatCount(data.waiting)} waiting`;
-    $("processing-stage-count").textContent = `${formatCount(data.processing)} in service`;
-    $("completed-stage-count").textContent = `${formatCount(data.completed)} completed`;
-    $("rejected-stage-count").textContent = formatCount(data.rejected);
-    $("queue-depth").innerHTML = `${formatCount(data.queue_depth)} <small>requests</small>`;
+    $("incoming-stage-count").textContent = `${formatCount(metrics.incoming)} received`;
+    $("waiting-stage-count").textContent = `${formatCount(metrics.waiting)} waiting`;
+    $("processing-stage-count").textContent = `${formatCount(metrics.processing)} in service`;
+    $("completed-stage-count").textContent = `${formatCount(metrics.completed)} completed`;
+    $("rejected-stage-count").textContent = formatCount(metrics.rejected);
+    $("queue-depth").innerHTML = `${formatCount(metrics.queue_depth)} <small>requests</small>`;
     $("estimated-wait").innerHTML = `${formatSeconds(data.estimated_wait_seconds)} <small>sec</small>`;
     $("service-rate").innerHTML = `${Number(data.effective_service_rate || 0).toFixed(1)} <small>req / sec</small>`;
     $("elapsed").textContent = formatDuration(data.session_started_at);
@@ -155,10 +158,10 @@
     setSliderFill(trafficSlider);
     $("capacity-value").textContent = capacitySlider.value;
     $("traffic-value").textContent = trafficSlider.value;
-    renderTokens("incoming-tokens", Math.min(data.incoming, 8), "#4b9cff");
-    renderTokens("waiting-tokens", data.waiting, "#f4b94f");
-    renderTokens("processing-tokens", data.processing, "#49cfdf");
-    renderTokens("completed-tokens", Math.min(data.completed, 8), "#4bd4a0");
+    renderTokens("incoming-tokens", Math.min(metrics.incoming, 8), "#4b9cff");
+    renderTokens("waiting-tokens", metrics.waiting, "#f4b94f");
+    renderTokens("processing-tokens", metrics.processing, "#49cfdf");
+    renderTokens("completed-tokens", Math.min(metrics.completed, 8), "#4bd4a0");
     startButton.disabled = running || stateName === "DRAINING";
     stopButton.disabled = !running;
   }

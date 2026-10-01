@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.admission_routes import get_db
 from backend.demo_simulator import DemoSimulator, demo_mode_enabled
+from backend.operator_telemetry import real_traffic_telemetry
 
 
 router = APIRouter(prefix="/api/v1/operator", tags=["operator-demo"])
@@ -46,12 +47,35 @@ def get_simulator(request: HttpRequest) -> DemoSimulator:
     return request.app.state.demo_simulator
 
 
+def with_traffic_telemetry(snapshot: dict) -> dict:
+    """Add source-separated and combined counters; live queue values stay DB-derived."""
+    real = real_traffic_telemetry.snapshot()
+    demo = {
+        "incoming": snapshot.get("demo_incoming", 0),
+        "allowed": snapshot.get("demo_allowed", 0),
+        "queued": snapshot.get("demo_queued", 0),
+        "rejected": snapshot.get("demo_rejected", 0),
+        "completed": snapshot.get("demo_completed", 0),
+        "failed": snapshot.get("demo_failed", 0),
+    }
+    combined = {
+        key: real[key] + demo[key]
+        for key in ("incoming", "allowed", "queued", "completed", "rejected", "failed")
+    }
+    combined.update({
+        "waiting": snapshot["waiting"],
+        "processing": snapshot["processing"],
+        "queue_depth": snapshot["queue_depth"],
+    })
+    return {**snapshot, "real_traffic": real, "demo_traffic": demo, "combined": combined}
+
+
 @router.get("/state", dependencies=[Depends(require_operator)])
 def current_operator_state(
     request: HttpRequest,
     db: Session = Depends(get_db),
 ):
-    return get_simulator(request).snapshot(db)
+    return with_traffic_telemetry(get_simulator(request).snapshot(db))
 
 
 @router.post("/simulator/start", dependencies=[Depends(require_operator)])
@@ -71,7 +95,7 @@ async def start_simulator(
         if str(exc) == "DEMO_DATA_LIMIT_REACHED":
             raise HTTPException(status_code=429, detail="Cumulative demo-data limit reached.") from exc
         raise HTTPException(status_code=409, detail="A demo session or shared queue drain is already active.") from exc
-    return simulator.snapshot(db)
+    return with_traffic_telemetry(simulator.snapshot(db))
 
 
 @router.post("/simulator/settings", dependencies=[Depends(require_operator)])
@@ -85,18 +109,18 @@ def update_simulator_settings(
         simulator.update_settings(settings.incoming_rate, settings.capacity)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail="No active demo session to configure.") from exc
-    return simulator.snapshot(db)
+    return with_traffic_telemetry(simulator.snapshot(db))
 
 
 @router.post("/simulator/stop", dependencies=[Depends(require_operator)])
 async def stop_simulator(request: HttpRequest, db: Session = Depends(get_db)):
     simulator = get_simulator(request)
     await simulator.stop()
-    return simulator.snapshot(db)
+    return with_traffic_telemetry(simulator.snapshot(db))
 
 
 @router.post("/simulator/reset", dependencies=[Depends(require_operator)])
 async def reset_simulator(request: HttpRequest, db: Session = Depends(get_db)):
     simulator = get_simulator(request)
     await simulator.reset()
-    return simulator.snapshot(db)
+    return with_traffic_telemetry(simulator.snapshot(db))

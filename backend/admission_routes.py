@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.api_key_routes import get_db, require_api_key
 from backend.admission_service import get_current_admission
+from backend.operator_telemetry import real_traffic_telemetry
 from backend.request_forwarder import forward_request, get_protected_service_config
 from database.models import ApiKey, Request
 from database.request_repository import current_queue_rank, get_idempotent_request
@@ -72,9 +73,17 @@ async def intake_request(
                 "status": existing.status,
             }
 
+    # OBSERVABILITY-ONLY: count an external intake once per logical idempotent request.
+    record_telemetry = real_traffic_telemetry.record_incoming(
+        api_key.id,
+        idempotency_key,
+        body.requested_url,
+    )
     decision = admission["decision"]
     if demo_simulator is not None:
         demo_simulator.record_real_decision(decision)
+    if record_telemetry and decision in {"ALLOW", "REJECT"}:
+        real_traffic_telemetry.record_decision(decision)
     response = {"decision": decision, "reason": admission["reason"]}
     if decision == "ALLOW":
         # DEMO-ONLY post-admission routing: hold eligible real requests in the same FIFO
@@ -91,6 +100,8 @@ async def intake_request(
             else None
         )
         if queued is not None:
+            if record_telemetry:
+                real_traffic_telemetry.record_queued()
             return {
                 **response,
                 "request_id": str(queued.id),
@@ -114,8 +125,12 @@ async def intake_request(
             },
         }
         if not forwarded.succeeded:
+            if record_telemetry:
+                real_traffic_telemetry.record_failure()
             result["forwarding"]["error"] = forwarded.error
             return JSONResponse(status_code=502, content=result)
+        if record_telemetry:
+            real_traffic_telemetry.record_completed()
         return result
     if decision == "REJECT":
         return response
@@ -132,6 +147,8 @@ async def intake_request(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if record_telemetry:
+        real_traffic_telemetry.record_queued()
     return {
         **response,
         "request_id": str(request.id),
